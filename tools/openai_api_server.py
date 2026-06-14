@@ -477,11 +477,22 @@ async def lifespan(app: FastAPI):
     global MODEL_MANAGER, SYNTH_SEM
     # Create the semaphore inside the running loop.
     SYNTH_SEM = asyncio.Semaphore(max(1, ARGS.concurrency))
+
+    # Pass quant / context-window knobs to the engine via env (read in init_model).
+    use_half = ARGS.half
+    if ARGS.quantize and ARGS.quantize != "none":
+        os.environ["FISH_QUANTIZE"] = ARGS.quantize
+        if ARGS.quantize == "int4" and ARGS.half:
+            logger.warning("int4 requires bf16; overriding --half -> running bf16.")
+            use_half = False
+    if ARGS.max_seq_len and ARGS.max_seq_len > 0:
+        os.environ["FISH_MAX_SEQ_LEN"] = str(ARGS.max_seq_len)
+
     logger.info("Loading models (this can take a minute, includes warm-up)...")
     MODEL_MANAGER = ModelManager(
         mode="tts",
         device=ARGS.device,
-        half=ARGS.half,
+        half=use_half,
         compile=ARGS.compile,
         llama_checkpoint_path=ARGS.llama_checkpoint_path,
         decoder_checkpoint_path=ARGS.decoder_checkpoint_path,
@@ -489,7 +500,8 @@ async def lifespan(app: FastAPI):
     )
     logger.info(
         f"Ready on http://{ARGS.listen}  device={ARGS.device}  "
-        f"concurrency={ARGS.concurrency}  queue_timeout={ARGS.queue_timeout}s"
+        f"concurrency={ARGS.concurrency}  queue_timeout={ARGS.queue_timeout}s  "
+        f"quantize={ARGS.quantize}  max_seq_len={ARGS.max_seq_len or 'default'}"
     )
     yield
     MODEL_MANAGER = None
@@ -668,6 +680,22 @@ def parse_args():
         type=float,
         default=float(os.environ.get("FISH_QUEUE_TIMEOUT", "300")),
         help="Seconds a request waits for a synthesis slot before returning 503.",
+    )
+    p.add_argument(
+        "--quantize",
+        choices=["none", "int8", "int4"],
+        default=os.environ.get("FISH_QUANTIZE", "none") or "none",
+        help="Weight-only quantization of the slow backbone (torchao). int8 ~"
+             "12.8GB & faster; int4 ~11GB & fastest but needs bf16 (drop --half). "
+             "Off by default.",
+    )
+    p.add_argument(
+        "--max-seq-len",
+        type=int,
+        default=int(os.environ.get("FISH_MAX_SEQ_LEN", "0") or "0"),
+        help="Override the model context window (default 8192). Smaller = less "
+             "KV cache / lower peak VRAM; long-form still works via the sliding "
+             "window. e.g. 4096. 0 = keep model default.",
     )
     return p.parse_args()
 

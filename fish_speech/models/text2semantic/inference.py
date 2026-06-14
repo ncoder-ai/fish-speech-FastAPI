@@ -359,11 +359,91 @@ def generate(
     return seq
 
 
+def _apply_quantization(model):
+    """Env-gated torchao weight-only quantization of the slow backbone.
+
+    FISH_QUANTIZE = int8 | int4 (default: off -> no behaviour change).
+    Only the 36-layer slow transformer (`self.layers.*` Linears) is quantized;
+    the fast/codebook path, tied embeddings and output head stay full precision
+    to protect audio-token quality. int4 (tinygemm) requires bf16, so run
+    WITHOUT --half. FISH_QUANT_GROUPSIZE tunes int4 group size (default 128)."""
+    import torch.nn as nn
+
+    mode = os.environ.get("FISH_QUANTIZE", "").strip().lower()
+    if mode not in ("int8", "int4"):
+        return
+    from torchao.quantization import quantize_
+
+    gs = int(os.environ.get("FISH_QUANT_GROUPSIZE", "128"))
+    if mode == "int8":
+        from torchao.quantization import Int8WeightOnlyConfig
+
+        cfg = Int8WeightOnlyConfig()
+    else:
+        from torchao.quantization import Int4WeightOnlyConfig
+
+        # The default 'plain'/'preshuffled' int4 formats need the mslk kernel
+        # lib (torch>=2.11). 'tile_packed_to_4d' is the aten tinygemm path:
+        # works on Ampere (sm_86) and traces under torch.compile(fullgraph=True).
+        try:
+            from torchao.quantization.quantize_.workflows.int4.int4_packing_format import (  # noqa: E501
+                Int4PackingFormat,
+            )
+
+            cfg = Int4WeightOnlyConfig(
+                group_size=gs,
+                int4_packing_format=Int4PackingFormat.TILE_PACKED_TO_4D,
+            )
+        except Exception:
+            cfg = Int4WeightOnlyConfig(group_size=gs)
+
+    def _filt(m, fqn):
+        return isinstance(m, nn.Linear) and fqn.startswith("layers.")
+
+    n = sum(1 for fqn, m in model.named_modules()
+            if isinstance(m, nn.Linear) and fqn.startswith("layers."))
+    logger.info(
+        f"[quant] torchao {mode} weight-only (group_size={gs}) "
+        f"-> {n} slow-backbone Linears"
+    )
+    t0 = time.time()
+    quantize_(model, cfg, filter_fn=_filt)
+    logger.info(f"[quant] applied in {time.time() - t0:.1f}s")
+
+
+def _override_max_seq_len(model):
+    """Env-gated reduction of the context window (FISH_MAX_SEQ_LEN).
+
+    Must run before setup_caches. A smaller max_seq_len shrinks the KV cache and
+    the generation peak; the sliding window in generate_long already keeps
+    long-form input working, so this only trades unused headroom for VRAM."""
+    v = os.environ.get("FISH_MAX_SEQ_LEN", "").strip()
+    if not v:
+        return
+    try:
+        new = int(v)
+    except ValueError:
+        logger.warning(f"[ctx] ignoring non-int FISH_MAX_SEQ_LEN={v!r}")
+        return
+    cur = int(model.config.max_seq_len)
+    if 0 < new < cur:
+        model.config.max_seq_len = new
+        logger.info(f"[ctx] max_seq_len {cur} -> {new} (smaller KV cache / peak)")
+    else:
+        logger.info(f"[ctx] FISH_MAX_SEQ_LEN={new} not < model max {cur}; keeping {cur}")
+
+
 def init_model(checkpoint_path, device, precision, compile=False):
     model = DualARTransformer.from_pretrained(checkpoint_path, load_weights=True)
 
     model = model.to(device=device, dtype=precision)
     logger.info(f"Restored model from checkpoint")
+
+    # Optional context-window reduction (env-gated; before any cache setup).
+    _override_max_seq_len(model)
+
+    # Optional weight-only quantization (env-gated; no-op unless FISH_QUANTIZE set).
+    _apply_quantization(model)
 
     if isinstance(model, DualARTransformer):
         decode_one_token = decode_one_token_ar

@@ -223,15 +223,23 @@ def run_scene(base, name, text, fmt):
 
 
 def main():
+    global OUT_DIR
     ap = argparse.ArgumentParser()
     ap.add_argument("--base-url", default="http://localhost:8770")
     ap.add_argument("--formats", default="wav,mp3")
+    ap.add_argument("--out-dir", default=OUT_DIR)
+    ap.add_argument("--only", default="",
+                    help="comma-separated scene names to run (default: all)")
     args = ap.parse_args()
+    OUT_DIR = args.out_dir
     os.makedirs(OUT_DIR, exist_ok=True)
     fmts = [f.strip() for f in args.formats.split(",") if f.strip()]
+    only = {s.strip() for s in args.only.split(",") if s.strip()}
 
     npass, nfail = 0, 0
     for name, text in SCENES.items():
+        if only and name not in only:
+            continue
         print(f"== {name} ==")
         for fmt in fmts:
             if run_scene(args.base_url, name, text, fmt):
