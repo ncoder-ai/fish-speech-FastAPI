@@ -37,7 +37,9 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
         self.compile = compile
 
     @torch.inference_mode()
-    def inference(self, req: ServeTTSRequest) -> Generator[InferenceResult, None, None]:
+    def inference(
+        self, req: ServeTTSRequest, cancel_event=None
+    ) -> Generator[InferenceResult, None, None]:
         """
         Main inference function:
         - Loads the reference audio and text.
@@ -62,7 +64,9 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
             logger.warning(f"set seed: {req.seed}")
 
         # Get the symbolic tokens from the LLAMA model
-        response_queue = self.send_Llama_request(req, prompt_tokens, prompt_texts)
+        response_queue = self.send_Llama_request(
+            req, prompt_tokens, prompt_texts, cancel_event
+        )
 
         # Get the sample rate from the decoder model
         if hasattr(self.decoder_model, "spec_transform"):
@@ -142,7 +146,11 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
         return None
 
     def send_Llama_request(
-        self, req: ServeTTSRequest, prompt_tokens: list, prompt_texts: list
+        self,
+        req: ServeTTSRequest,
+        prompt_tokens: list,
+        prompt_texts: list,
+        cancel_event=None,
     ) -> queue.Queue:
         """
         Send a request to the LLAMA model to generate the symbolic tokens.
@@ -161,6 +169,7 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
             chunk_length=req.chunk_length,
             prompt_tokens=prompt_tokens,
             prompt_text=prompt_texts,
+            cancel_event=cancel_event,
         )
 
         # Create a queue to get the response

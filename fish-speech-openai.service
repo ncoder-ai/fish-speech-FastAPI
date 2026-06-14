@@ -1,0 +1,25 @@
+# systemd unit for the Fish-Speech S2-Pro OpenAI API.
+# Install:
+#   sudo cp fish-speech-openai.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now fish-speech-openai
+[Unit]
+Description=Fish Speech S2-Pro OpenAI-compatible TTS API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nishant
+WorkingDirectory=/home/nishant/App/fish-speech
+Environment=FISH_DEVICE=cuda:3
+Environment=FISH_LISTEN=0.0.0.0:8770
+Environment=FISH_COMPILE=1
+Environment=FISH_HALF=1
+# Environment=FISH_API_KEY=change-me
+ExecStart=/home/nishant/App/fish-speech/run_openai_api.sh start --fg
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,6 @@
+# Extra deps for the OpenAI-compatible API layer (on top of `uv sync --extra cu128`).
+# Install with:  uv pip install -r requirements-openai-api.txt
+fastapi>=0.115
+python-multipart>=0.0.9
+# `openai` is only needed to RUN the client-compatibility tests, not the server.
+openai>=1.40

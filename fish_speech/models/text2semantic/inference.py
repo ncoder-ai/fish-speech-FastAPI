@@ -537,7 +537,11 @@ def generate_long(
     chunk_length: int = 512,
     prompt_text: Optional[Union[str, list[str]]] = None,
     prompt_tokens: Optional[Union[torch.Tensor, list[torch.Tensor]]] = None,
+    cancel_event=None,
 ):
+    # Optional threading.Event: when set (e.g. the HTTP client disconnected) the
+    # batch loop stops after the current batch so the worker is freed promptly
+    # instead of grinding through the rest of a long multi-batch request.
     assert 0 < top_p <= 1, "top_p must be in (0, 1]"
     assert 0 < temperature < 2, "temperature must be in (0, 2)"
 
@@ -608,16 +612,26 @@ def generate_long(
 
     logger.info(f"Split into {len(turns)} turns, grouped into {len(batches)} batches")
 
+    cancelled = False
     for sample_idx in range(num_samples):
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-
-        t0 = time.perf_counter()
 
         # Deep copy base conversation for this sample
         conversation = deepcopy(base_conversation)
 
         for batch_idx, batch_text in enumerate(batches):
+            if cancel_event is not None and cancel_event.is_set():
+                logger.info("Generation cancelled (client disconnected); stopping.")
+                cancelled = True
+                break
+
+            # Per-batch start time. NOTE: must be reset each batch -- otherwise
+            # t_batch below measures cumulative time since the sample started,
+            # which makes every later batch look progressively (and falsely)
+            # slower in the logs.
+            t0 = time.perf_counter()
+
             logger.info(
                 f"--- Sample {sample_idx}, Batch {batch_idx} "
                 f"({len(batch_text.encode('utf-8'))} bytes) ---"
@@ -635,28 +649,48 @@ def generate_long(
                 )
             )
 
-            # Deep copy for generation (don't pollute original conversation)
-            conversation_gen = deepcopy(conversation)
-            conversation_gen.append(
-                Message(
-                    role="assistant",
-                    parts=[],
-                    cal_loss=False,
-                    modality="voice",
-                    add_im_start=True,
-                    add_im_end=False,
+            # Build the generation conversation (don't pollute the running one)
+            # and bound its length with a SLIDING WINDOW. Long inputs are chunked
+            # into many batches, but each batch is generated against the whole
+            # accumulated conversation (all prior text + audio) for voice
+            # consistency -- so the prompt grows ~one turn per batch and would
+            # eventually overflow max_seq_len and crash the request. Instead of
+            # raising, drop the OLDEST turn pairs (keeping the system message,
+            # which holds the reference voice, plus the most recent turns) until
+            # the prompt fits. Behaviour is unchanged until the limit is reached.
+            budget = max_length - 2048
+            while True:
+                conversation_gen = deepcopy(conversation)
+                conversation_gen.append(
+                    Message(
+                        role="assistant",
+                        parts=[],
+                        cal_loss=False,
+                        modality="voice",
+                        add_im_start=True,
+                        add_im_end=False,
+                    )
                 )
-            )
+                encoded, audio_masks, audio_parts = (
+                    conversation_gen.encode_for_inference(
+                        tokenizer, num_codebooks=model.config.num_codebooks
+                    )
+                )
+                # messages: [system, u0, a0, u1, a1, ..., u_current]; trim the
+                # oldest user/assistant pair after the system message.
+                if encoded.size(1) <= budget or len(conversation.messages) <= 2:
+                    break
+                del conversation.messages[1:3]
+                logger.info(
+                    f"Context window full ({encoded.size(1)} > {budget}); dropped "
+                    "oldest turn pair to keep long-form generation bounded."
+                )
 
             logger.info("Visualizing prompt structure:")
             conversation_gen.visualize(
                 tokenizer,
                 merge_audio_tokens=True,
                 merge_semantic_tokens=True,
-            )
-
-            encoded, audio_masks, audio_parts = conversation_gen.encode_for_inference(
-                tokenizer, num_codebooks=model.config.num_codebooks
             )
 
             logger.info(f"Encoded prompt shape: {encoded.shape}")
@@ -667,9 +701,11 @@ def generate_long(
                     f"Audio masks non-zero count: {torch.count_nonzero(audio_masks)}"
                 )
 
-            if encoded.size(1) > max_length - 2048:
+            if encoded.size(1) > budget:
+                # Only possible if a single batch alone exceeds the budget.
                 raise ValueError(
-                    f"Prompt is too long: {encoded.size(1)} > {max_length - 2048}"
+                    f"Prompt is too long even after trimming: "
+                    f"{encoded.size(1)} > {budget}"
                 )
 
             encoded = encoded.to(device=device)
@@ -727,10 +763,16 @@ def generate_long(
 
         if torch.cuda.is_available():
             logger.info(
-                f"GPU Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB"
+                "GPU Memory used: "
+                f"{torch.cuda.max_memory_reserved(device) / 1e9:.02f} GB"
             )
 
+        # Always emit the terminal sentinel so consumers (the engine loop reading
+        # the response queue) break cleanly instead of blocking forever.
         yield GenerateResponse(action="next")
+
+        if cancelled:
+            break
 
 
 @dataclass
