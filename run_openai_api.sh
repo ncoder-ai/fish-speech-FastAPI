@@ -19,6 +19,7 @@ COMPILE="${FISH_COMPILE:-1}"          # 1 = torch.compile (faster steady state)
 HALF="${FISH_HALF:-1}"                # 1 = fp16 (auto-disabled for int4)
 QUANTIZE="${FISH_QUANTIZE:-none}"     # none | int8 (~12.8GB) | int4 (~11GB, bf16)
 MAX_SEQ_LEN="${FISH_MAX_SEQ_LEN:-0}"  # 0 = model default (8192); e.g. 4096 = lower peak VRAM
+VOICES_DIR="${VOICES_DIR:-}"          # folder to auto-register + watch voices from (e.g. /home/nishant/apps/voices)
 # export FISH_API_KEY=... to require a bearer token.
 
 PY=".venv/bin/python"
@@ -36,6 +37,7 @@ build_args() {
   [[ "$COMPILE" == "1" ]] && ARGS+=(--compile)
   [[ "$QUANTIZE" != "none" ]] && ARGS+=(--quantize "$QUANTIZE")
   [[ "$MAX_SEQ_LEN" != "0" ]] && ARGS+=(--max-seq-len "$MAX_SEQ_LEN")
+  [[ -n "$VOICES_DIR" ]] && ARGS+=(--voices-dir "$VOICES_DIR")
   return 0   # never let a false [[ ]] && ... above abort under `set -e`
 }
 

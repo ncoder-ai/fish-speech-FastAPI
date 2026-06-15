@@ -33,7 +33,8 @@ import subprocess
 import tempfile
 import threading
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Generator, List, Optional
+from pathlib import Path
+from typing import AsyncGenerator, Dict, Generator, List, Optional
 
 import numpy as np
 import pyrootutils
@@ -48,6 +49,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from fish_speech.utils.file import AUDIO_EXTENSIONS
 from fish_speech.utils.schema import ServeReferenceAudio, ServeTTSRequest
 from tools.server.model_manager import ModelManager
 
@@ -108,6 +110,10 @@ class SpeechRequest(BaseModel):
     # ---- Fish-Speech extras (optional, ignored by vanilla OpenAI clients) ----
     instructions: Optional[str] = None  # OpenAI field; prepended as a tag if given
     reference_id: Optional[str] = None
+    # Map speaker id -> registered voice id for a SINGLE multi-speaker request,
+    # e.g. {"0": "voice_a", "1": "voice_b"}. The `input` must contain matching
+    # <|speaker:N|> turns. Lets a whole multi-voice scene render in one call.
+    voice_map: Optional[Dict[str, str]] = None
     seed: Optional[int] = None
     temperature: float = 0.8
     top_p: float = 0.8
@@ -200,10 +206,47 @@ def _ffmpeg_encode(pcm16: bytes, sr: int, fmt: str) -> bytes:
 # ----------------------------------------------------------------------------
 # Core synthesis -> byte stream
 # ----------------------------------------------------------------------------
+def _voice_dir(voice_id: str) -> Path:
+    return Path("references") / voice_id
+
+
+def _references_from_voice_map(voice_map: Dict[str, str]) -> List[ServeReferenceAudio]:
+    """Build per-speaker reference audios from {speaker_id: registered_voice_id}.
+
+    Each reference's text is pre-tagged `<|speaker:N|>` so generate_long binds
+    that registered voice to that speaker -> a whole multi-voice scene renders in
+    one request (no per-line stitching / accumulated pauses)."""
+    def _key(kv):
+        try:
+            return (0, int(kv[0]))
+        except ValueError:
+            return (1, kv[0])
+
+    refs: List[ServeReferenceAudio] = []
+    for spk, vid in sorted(voice_map.items(), key=_key):
+        d = _voice_dir(vid)
+        if not d.is_dir():
+            raise HTTPException(404, f"Unknown voice '{vid}' for speaker {spk}")
+        audio = next((f for f in sorted(d.iterdir())
+                      if f.suffix.lower() in AUDIO_EXTENSIONS), None)
+        if audio is None:
+            raise HTTPException(400, f"Voice '{vid}' has no audio file")
+        lab = audio.with_suffix(".lab")
+        text = lab.read_text(encoding="utf-8").strip() if lab.exists() else ""
+        refs.append(ServeReferenceAudio(
+            audio=audio.read_bytes(), text=f"<|speaker:{spk}|>{text}"))
+    return refs
+
+
 def _build_tts_request(r: SpeechRequest, text: str, streaming: bool,
                        seed=None, max_new_tokens=None) -> ServeTTSRequest:
+    references: List[ServeReferenceAudio] = []
     reference_id = r.reference_id
-    if reference_id is None and r.voice and r.voice.lower() not in _OPENAI_VOICES:
+    if r.voice_map:
+        # Per-speaker registered voices for a single multi-speaker request.
+        references = _references_from_voice_map(r.voice_map)
+        reference_id = None
+    elif reference_id is None and r.voice and r.voice.lower() not in _OPENAI_VOICES:
         # Non-OpenAI voice name -> treat as a registered reference id.
         reference_id = r.voice
 
@@ -213,7 +256,7 @@ def _build_tts_request(r: SpeechRequest, text: str, streaming: bool,
         text=text,
         chunk_length=max(100, min(1000, r.chunk_length)),
         format="wav",
-        references=[],
+        references=references,
         reference_id=reference_id,
         seed=seed if seed is not None else r.seed,
         normalize=r.normalize,
@@ -477,6 +520,68 @@ def _synthesize_full(r: SpeechRequest, fmt: str) -> bytes:
 
 
 # ----------------------------------------------------------------------------
+# Voice inbox: auto-register voices dropped into a watched folder
+# ----------------------------------------------------------------------------
+def _scan_voice_inbox(voices_dir: str) -> int:
+    """Auto-register voices found in `voices_dir` into the reference registry.
+
+    Accepts either flat files (`<id>.<ext>` plus an optional `<id>.lab`/`<id>.txt`
+    transcript) or per-voice subfolders (`<id>/` containing audio + .lab).
+    Already-registered ids are skipped (idempotent). Returns count newly added.
+    Pure file I/O (add_reference just copies into references/); the audio is
+    encoded lazily on first use, so this is cheap to run periodically."""
+    if not voices_dir:
+        return 0
+    base = Path(voices_dir)
+    if not base.is_dir():
+        return 0
+    engine = MODEL_MANAGER.tts_inference_engine
+    try:
+        existing = set(engine.list_reference_ids())
+    except Exception:
+        existing = set()
+
+    candidates = []  # (voice_id, audio_path, transcript)
+    for entry in sorted(base.iterdir()):
+        if entry.is_dir():
+            audio = next((f for f in sorted(entry.iterdir())
+                          if f.suffix.lower() in AUDIO_EXTENSIONS), None)
+            if audio is None:
+                continue
+            lab = audio.with_suffix(".lab")
+            txt = lab.read_text(encoding="utf-8").strip() if lab.exists() else ""
+            candidates.append((entry.name, audio, txt))
+        elif entry.is_file() and entry.suffix.lower() in AUDIO_EXTENSIONS:
+            txt = ""
+            for ext in (".lab", ".txt"):
+                cand = entry.with_suffix(ext)
+                if cand.exists():
+                    txt = cand.read_text(encoding="utf-8").strip()
+                    break
+            candidates.append((entry.stem, entry, txt))
+
+    n = 0
+    for vid, audio, txt in candidates:
+        if vid in existing:
+            continue
+        if not txt:
+            logger.warning(
+                f"[voices] '{vid}': no transcript; registering with empty text "
+                "(add a matching .lab/.txt for better cloning)"
+            )
+        try:
+            engine.add_reference(vid, str(audio), txt)
+            existing.add(vid)
+            n += 1
+            logger.info(f"[voices] auto-registered '{vid}' <- {audio.name}")
+        except FileExistsError:
+            pass
+        except Exception as e:
+            logger.error(f"[voices] failed to register '{vid}': {e}")
+    return n
+
+
+# ----------------------------------------------------------------------------
 # FastAPI app
 # ----------------------------------------------------------------------------
 @asynccontextmanager
@@ -512,12 +617,37 @@ async def lifespan(app: FastAPI):
         decoder_checkpoint_path=ARGS.decoder_checkpoint_path,
         decoder_config_name=ARGS.decoder_config_name,
     )
+    # Auto-register voices from the watched inbox folder, then keep watching.
+    monitor_task = None
+    if ARGS.voices_dir:
+        try:
+            n = _scan_voice_inbox(ARGS.voices_dir)
+            logger.info(f"[voices] watching '{ARGS.voices_dir}' ({n} new at startup)")
+        except Exception:
+            logger.exception("[voices] startup scan failed")
+        if ARGS.voices_scan_interval and ARGS.voices_scan_interval > 0:
+            async def _voice_monitor():
+                loop = asyncio.get_event_loop()
+                while True:
+                    await asyncio.sleep(ARGS.voices_scan_interval)
+                    try:
+                        c = await loop.run_in_executor(
+                            None, _scan_voice_inbox, ARGS.voices_dir)
+                        if c:
+                            logger.info(f"[voices] monitor registered {c} new voice(s)")
+                    except Exception:
+                        logger.exception("[voices] monitor scan failed")
+            monitor_task = asyncio.create_task(_voice_monitor())
+
     logger.info(
         f"Ready on http://{ARGS.listen}  device={ARGS.device}  "
         f"concurrency={ARGS.concurrency}  queue_timeout={ARGS.queue_timeout}s  "
-        f"quantize={ARGS.quantize}  max_seq_len={ARGS.max_seq_len or 'default'}"
+        f"quantize={ARGS.quantize}  max_seq_len={ARGS.max_seq_len or 'default'}  "
+        f"voices_dir={ARGS.voices_dir or 'off'}"
     )
     yield
+    if monitor_task:
+        monitor_task.cancel()
     MODEL_MANAGER = None
 
 
@@ -710,6 +840,20 @@ def parse_args():
         help="Override the model context window (default 8192). Smaller = less "
              "KV cache / lower peak VRAM; long-form still works via the sliding "
              "window. e.g. 4096. 0 = keep model default.",
+    )
+    p.add_argument(
+        "--voices-dir",
+        default=os.environ.get("VOICES_DIR") or os.environ.get("FISH_VOICES_DIR"),
+        help="Folder to auto-register reference voices from at startup (and watch "
+             "for new drops). Each voice = an audio file <id>.wav (+ optional "
+             "<id>.lab/.txt transcript) or a subfolder <id>/ with audio + .lab. "
+             "Empty = disabled.",
+    )
+    p.add_argument(
+        "--voices-scan-interval",
+        type=float,
+        default=float(os.environ.get("FISH_VOICES_SCAN_INTERVAL", "30") or "30"),
+        help="Seconds between rescans of --voices-dir (0 = scan once at startup).",
     )
     return p.parse_args()
 
