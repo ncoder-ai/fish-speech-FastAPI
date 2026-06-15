@@ -34,7 +34,7 @@ import tempfile
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator, Dict, Generator, List, Optional
+from typing import AsyncGenerator, Dict, Generator, List, Optional, Tuple
 
 import numpy as np
 import pyrootutils
@@ -218,20 +218,51 @@ def _voice_dir(voice_id: str) -> Path:
     return Path("references") / voice_id
 
 
+def _voice_map_key(kv):
+    try:
+        return (0, int(kv[0]))
+    except ValueError:
+        return (1, kv[0])
+
+
+def _voice_map_problem(voice_map: Dict[str, str]) -> Optional[Tuple[int, str]]:
+    """Cheap pre-flight validation of a voice_map (no audio bytes read).
+
+    Returns (status, detail) for the FIRST unresolvable entry, else None.
+    OpenAI presets (and "", "default") are allowed — they render zero-shot for
+    that speaker, exactly like the singular `voice` field. This MUST be called
+    in the request handler BEFORE a StreamingResponse begins: once the 200 is
+    on the wire, an HTTPException raised inside the streaming generator can't
+    reach the client and just yields a silent empty stream (the bug this fixes).
+    """
+    for spk, vid in voice_map.items():
+        if (vid or "").lower() in _OPENAI_VOICES:
+            continue  # zero-shot for this speaker
+        d = _voice_dir(vid)
+        if not d.is_dir():
+            return (404, f"Unknown voice '{vid}' for speaker {spk}")
+        audio = next((f for f in sorted(d.iterdir())
+                      if f.suffix.lower() in AUDIO_EXTENSIONS), None)
+        if audio is None:
+            return (400, f"Voice '{vid}' has no audio file")
+    return None
+
+
 def _references_from_voice_map(voice_map: Dict[str, str]) -> List[ServeReferenceAudio]:
     """Build per-speaker reference audios from {speaker_id: registered_voice_id}.
 
     Each reference's text is pre-tagged `<|speaker:N|>` so generate_long binds
     that registered voice to that speaker -> a whole multi-voice scene renders in
-    one request (no per-line stitching / accumulated pauses)."""
-    def _key(kv):
-        try:
-            return (0, int(kv[0]))
-        except ValueError:
-            return (1, kv[0])
+    one request (no per-line stitching / accumulated pauses).
 
+    A speaker mapped to an OpenAI preset (or "" / "default") is SKIPPED — it gets
+    no reference and renders zero-shot, mirroring the singular `voice` field. So a
+    scene can mix registered-clone speakers and preset/zero-shot speakers in one
+    request instead of failing the whole call."""
     refs: List[ServeReferenceAudio] = []
-    for spk, vid in sorted(voice_map.items(), key=_key):
+    for spk, vid in sorted(voice_map.items(), key=_voice_map_key):
+        if (vid or "").lower() in _OPENAI_VOICES:
+            continue  # zero-shot for this speaker
         d = _voice_dir(vid)
         if not d.is_dir():
             raise HTTPException(404, f"Unknown voice '{vid}' for speaker {spk}")
@@ -770,6 +801,17 @@ async def audio_speech(request: Request, body: SpeechRequest):
     fmt = (body.response_format or "mp3").lower()
     if fmt not in {"mp3", "opus", "aac", "flac", "wav", "pcm"}:
         raise HTTPException(400, f"Unsupported response_format: {fmt}")
+
+    # Validate voice_map UP FRONT — before acquiring the slot or opening a
+    # StreamingResponse. An unknown voice raised inside the streaming generator
+    # arrives after the 200 headers and degrades to a silent empty stream
+    # (clients then fall back to choppy per-line stitching). Surfacing it here
+    # returns a proper 4xx the caller can act on. Presets render zero-shot and
+    # are not errors.
+    if body.voice_map:
+        problem = _voice_map_problem(body.voice_map)
+        if problem:
+            raise HTTPException(problem[0], problem[1])
 
     want_stream = bool(body.stream or (body.stream_format == "audio"))
 
