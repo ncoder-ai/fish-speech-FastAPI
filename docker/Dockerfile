@@ -426,4 +426,4 @@ EXPOSE 8770
 HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=5 \
     CMD curl -f http://localhost:8770/health || exit 1
 
-ENTRYPOINT ["bash", "/app/docker/openai-entrypoint.sh"]
+ENTRYPOINT ["bash", "/app/openai-entrypoint.sh"]
