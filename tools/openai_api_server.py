@@ -99,7 +99,15 @@ EMOTION_TAGS = [
 # ----------------------------------------------------------------------------
 class SpeechRequest(BaseModel):
     model: str = "s2-pro"
-    input: str = Field(..., description="Text to synthesize. Inline emotion tags allowed, e.g. [whisper] hello.")
+    input: str = Field(
+        ...,
+        description=(
+            "Text to synthesize. Inline emotion tags like [excited]/[whisper] are "
+            "supported. For dialogue, tag turns with <|speaker:0|>...<|speaker:1|>... "
+            "and send the whole scene in one request. See the API description for the "
+            "full guide."
+        ),
+    )
     voice: str = "default"
     response_format: str = Field("mp3", description="mp3|opus|aac|flac|wav|pcm")
     speed: float = Field(1.0, ge=0.25, le=4.0)
@@ -664,7 +672,52 @@ async def _acquire_slot():
         raise HTTPException(503, "Server busy; retry shortly")
 
 
-app = FastAPI(title="Fish Speech S2-Pro OpenAI API", version="2.0.0", lifespan=lifespan)
+_API_DESCRIPTION = """
+OpenAI-compatible TTS for Fish-Speech / OpenAudio **S2-Pro**, with multi-speaker
+dialogue, inline emotions, and voice cloning.
+
+Point any OpenAI client at `…/v1` and call `audio.speech`. The Fish extras below
+are added on top and ignored by vanilla OpenAI clients.
+
+## Emotions (inline tags)
+Put `[tag]` inline in `input`; the tag colours the speech that follows until the
+next tag. Examples: `[excited]`, `[sad]`, `[angry]`, `[whisper]`, `[shouting]`,
+`[laughing]`, `[sigh]`, `[low voice]`, `[surprised]`. S2-Pro accepts free-form
+tags too. Full built-in list: `GET /health` → `emotion_tags`.
+```
+"input": "[excited] We did it! [whisper] But keep it between us."
+```
+
+## Multiple speakers (one scene, one request)
+Tag each turn with `<|speaker:N|>`. Send the **whole scene in a single request** —
+the model keeps each speaker's voice consistent and paces turns naturally.
+**Do NOT** send one line per request and stitch the clips: that accumulates
+silence between clips and sounds choppy.
+```
+"input": "<|speaker:0|>[calm] Where were you?\\n<|speaker:1|>[nervous] I can explain."
+```
+Plain prose (no `<|speaker|>` tags) is treated as one narrator and chunked
+automatically by `chunk_length`.
+
+## Voices
+- `voice`: a registered voice id (or an OpenAI name like `alloy` → model default).
+- `voice_map`: map speakers → registered voices for a multi-speaker request,
+  e.g. `{"0": "voice_a", "1": "voice_b"}` (the `input` must contain matching
+  `<|speaker:N|>` turns).
+- `reference_id`: a single registered voice id.
+
+Voices live in the `references/` registry. Register via `POST /v1/voices`
+(multipart: `id`, `text`, `audio`), or drop audio (+ optional `.lab`/`.txt`
+transcript) into the server's watched `VOICES_DIR` to auto-register. List with
+`GET /v1/voices`.
+
+## Tuning
+`temperature`, `top_p`, `seed`, `chunk_length` (raise for fewer pauses in long
+narration), `response_format` (`mp3|opus|aac|flac|wav|pcm`), `stream`.
+"""
+
+app = FastAPI(title="Fish Speech S2-Pro OpenAI API", version="2.0.0",
+              description=_API_DESCRIPTION, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
@@ -696,6 +749,19 @@ async def list_models():
 
 @app.post("/v1/audio/speech")
 async def audio_speech(request: Request, body: SpeechRequest):
+    """OpenAI-compatible TTS with multi-speaker + emotion extras.
+
+    Single narrator:
+        {"input": "[excited] Hello world!", "voice": "narrator"}
+
+    Whole multi-speaker scene in ONE request (recommended — do not stitch
+    per-line clips, that adds choppy pauses):
+        {"input": "<|speaker:0|>[calm] Where were you?\\n"
+                  "<|speaker:1|>[nervous] I can explain.",
+         "voice_map": {"0": "voice_a", "1": "voice_b"}}
+
+    See the API description (top of /docs) for the full emotion/speaker guide.
+    """
     await _check_auth(request)
     if MODEL_MANAGER is None:
         raise HTTPException(503, "Model still loading")
