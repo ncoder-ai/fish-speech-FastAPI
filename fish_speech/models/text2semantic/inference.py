@@ -451,9 +451,15 @@ def _load_prequantized(checkpoint_path, device):
     logger.info(f"[quant] loading pre-quantized weights from {qpath} "
                 "(skipping per-boot re-quant)")
     t0 = time.time()
-    model = DualARTransformer.from_pretrained(checkpoint_path, load_weights=False)
+    # Build the architecture skeleton directly in GPU VRAM (not CPU RAM). Its
+    # random weights are immediately overwritten by the quantized tensors below,
+    # but allocating them on the GPU avoids an ~8GB CPU-RAM peak that
+    # swap-thrashes low-RAM hosts (turned a ~24s load into ~235s on the 11GB
+    # box). The 24GB card easily holds the transient skeleton + state dict.
+    with torch.device(device):
+        model = DualARTransformer.from_pretrained(checkpoint_path, load_weights=False)
     _override_max_seq_len(model)
-    sd = torch.load(qpath, map_location="cpu", weights_only=False)
+    sd = torch.load(qpath, map_location=device, weights_only=False)
     missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
     if unexpected:
         logger.warning(f"[quant] {len(unexpected)} unexpected keys (e.g. "
