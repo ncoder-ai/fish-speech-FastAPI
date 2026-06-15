@@ -25,6 +25,14 @@ VOICES_DIR="${VOICES_DIR:-}"          # folder to auto-register + watch voices f
 export FISH_AUTO_TRANSCRIBE="${FISH_AUTO_TRANSCRIBE:-1}"   # 1=on 0=off
 export FISH_ASR_MODEL="${FISH_ASR_MODEL:-small}"          # small=multilingual; small.en=English-only
 export FISH_ASR_DEVICE="${FISH_ASR_DEVICE:-cpu}"          # cpu | cuda:N
+# Persist torch.compile (Inductor) + Triton kernel caches across restarts so a
+# warm start skips the ~4-min CPU kernel recompile. Cache is keyed on
+# torch/triton/GPU-arch/code; a bump triggers ONE cold recompile, fast after.
+TORCH_CACHE_DIR="${FISH_TORCH_CACHE_DIR:-$PWD/.torch-cache}"
+export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-$TORCH_CACHE_DIR/inductor}"
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$TORCH_CACHE_DIR/triton}"
+export TORCHINDUCTOR_FX_GRAPH_CACHE="${TORCHINDUCTOR_FX_GRAPH_CACHE:-1}"
+mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR" 2>/dev/null || true
 # export FISH_API_KEY=... to require a bearer token.
 
 PY=".venv/bin/python"

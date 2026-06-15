@@ -38,10 +38,19 @@ services:
       FISH_ASR_DEVICE: "${FISH_ASR_DEVICE:-cpu}"  # cpu | cuda:0 (cpu avoids VRAM contention)
       FISH_CONCURRENCY: "${FISH_CONCURRENCY:-1}"
       FISH_QUEUE_TIMEOUT: "${FISH_QUEUE_TIMEOUT:-300}"
+      # Persist torch.compile/Triton kernels to the mounted cache (below) so a
+      # restart skips the ~4-min CPU kernel recompile.
+      TORCHINDUCTOR_CACHE_DIR: "/app/.torch-cache/inductor"
+      TRITON_CACHE_DIR: "/app/.torch-cache/triton"
+      TORCHINDUCTOR_FX_GRAPH_CACHE: "1"
     volumes:
       - "${FISH_CHECKPOINTS_HOST_DIR:-./checkpoints}:/app/checkpoints"
       - "${FISH_VOICES_HOST_DIR:-./voices}:/app/voices"
       - "${FISH_REFERENCES_HOST_DIR:-./references}:/app/references"
+      # Persist torch.compile (Inductor) + Triton kernel caches so a restart
+      # skips the ~4-min CPU recompile. Pre-create the host dir owned by
+      # FISH_UID:FISH_GID so the container (non-root) can write it.
+      - "${FISH_TORCH_CACHE_HOST_DIR:-./.torch-cache}:/app/.torch-cache"
     deploy:
       resources:
         reservations:

@@ -15,7 +15,8 @@ import requests
 import soundfile as sf
 import librosa
 
-BASE = "http://localhost:8770"
+import os
+BASE = os.environ.get("BASE", "http://localhost:8770")
 
 spk0 = sys.argv[1] if len(sys.argv) > 1 else "grace2"
 spk1 = sys.argv[2] if len(sys.argv) > 2 else "david_attenborough_cc3"
