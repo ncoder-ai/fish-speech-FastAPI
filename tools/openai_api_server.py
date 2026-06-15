@@ -569,23 +569,24 @@ def _scan_voice_inbox(voices_dir: str) -> int:
             candidates.append((entry.stem, entry, txt))
 
     n = 0
+    no_txt = 0
     for vid, audio, txt in candidates:
         if vid in existing:
             continue
-        if not txt:
-            logger.warning(
-                f"[voices] '{vid}': no transcript; registering with empty text "
-                "(add a matching .lab/.txt for better cloning)"
-            )
         try:
             engine.add_reference(vid, str(audio), txt)
             existing.add(vid)
             n += 1
-            logger.info(f"[voices] auto-registered '{vid}' <- {audio.name}")
+            if not txt:
+                no_txt += 1
+            logger.debug(f"[voices] auto-registered '{vid}' <- {audio.name}")
         except FileExistsError:
             pass
         except Exception as e:
             logger.error(f"[voices] failed to register '{vid}': {e}")
+    if n:
+        extra = f" ({no_txt} without transcript)" if no_txt else ""
+        logger.info(f"[voices] registered {n} new voice(s) from {voices_dir}{extra}")
     return n
 
 
