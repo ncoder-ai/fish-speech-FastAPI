@@ -158,12 +158,54 @@ accepted via `/v1/tts`.
 
 ## Performance / VRAM knobs
 
-- `FISH_QUANTIZE=int8|int4` — torchao weight-only quant (forces bf16). int8
-  ≈ 12.8 GB & faster; int4 ≈ 11 GB. Off by default.
+- `FISH_QUANTIZE=int8|int4` — torchao weight-only quant (forces bf16). int4 is
+  the leaner option. On a 24 GB 3090: int8 ≈ 12.2 GB, int4 ≈ 11.1 GB at the
+  default 8192 context, ≈ 9.85 GB at 4096. Only the backbone Linears are
+  quantized (embeddings/head/codec stay full precision for audio quality), so
+  the savings are modest. Off by default.
+- `FISH_QUANTIZED_WEIGHTS=checkpoints/s2-pro/model.int4.g128.pt` — load
+  **pre-quantized** weights instead of re-quantizing on every boot (model-load
+  drops to ~5 s vs minutes; no CPU-RAM/swap pressure). See "Pre-quantized
+  weights" below.
 - `FISH_MAX_SEQ_LEN=4096` — smaller context = less KV cache / lower peak VRAM;
-  long-form still works via the sliding window.
+  long-form still works via the sliding window, but a ~400–500 word multi-speaker
+  scene will trim older turns ~10× at 4096 (voices stay consistent; some
+  long-range continuity is lost). Keep 8192 (default) for full-scene context.
+- `FISH_TORCH_CACHE_HOST_DIR` (`./.torch-cache`) — persists the torch.compile /
+  Triton kernel cache so a warm restart skips the ~4-min recompile (~44 s warm).
 - `FISH_CONCURRENCY` (1) — concurrent synths; `FISH_QUEUE_TIMEOUT` (300 s) —
   requests wait this long for a slot then get a fast **503** (no unbounded hang).
+
+## Pre-quantized weights (quantize once; persist; move between boxes)
+
+Quantizing at load runs torchao in CPU RAM **every boot** (slow; swap-thrashes
+low-RAM hosts). Instead, quantize once and load the saved tensors:
+
+```bash
+# Generate once (uses this box's torch/torchao/GPU). int4 or int8.
+FISH_QUANTIZE=int4 DEV=cuda:0 \
+  .venv/bin/python tools/quantize_save.py checkpoints/s2-pro \
+  checkpoints/s2-pro/model.int4.g128.pt
+
+# Then point the server at it:
+export FISH_QUANTIZE=int4
+export FISH_QUANTIZED_WEIGHTS=checkpoints/s2-pro/model.int4.g128.pt
+./run_openai_api.sh start
+```
+
+- **Auto-generate:** if `FISH_QUANTIZED_WEIGHTS` is set but the file is missing,
+  `run_openai_api.sh` (and the container entrypoint) generates it once on
+  startup, then loads it. So a fresh box self-provisions on first boot.
+- **Persistence:** the file lives under `checkpoints/` (a **mounted volume** in
+  the container — `FISH_CHECKPOINTS_HOST_DIR`), never baked into the image. It
+  survives rebuilds, restarts, and reboots. Deleting the checkpoints dir is the
+  only way to lose it.
+- **Different box / sharing:** the `.pt` is **coupled to torch/torchao + GPU
+  arch** (e.g. built with torch 2.8 + torchao 0.17 on Ampere). For a box with
+  the **same stack**, copy the file (rsync, or a shared NFS/object store) to skip
+  the one-time generation. For a **different stack**, don't copy it — let the box
+  regenerate (just set the two env vars; first boot builds a compatible file).
+  Regenerate after bumping torch/torchao.
 
 ## Notes / limits
 
