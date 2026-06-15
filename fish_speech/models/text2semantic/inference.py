@@ -433,17 +433,54 @@ def _override_max_seq_len(model):
         logger.info(f"[ctx] FISH_MAX_SEQ_LEN={new} not < model max {cur}; keeping {cur}")
 
 
-def init_model(checkpoint_path, device, precision, compile=False):
-    model = DualARTransformer.from_pretrained(checkpoint_path, load_weights=True)
+def _load_prequantized(checkpoint_path, device):
+    """Load pre-quantized weights (from tools/quantize_save.py) straight to GPU,
+    skipping the per-boot CPU re-quant. Returns the model or None if not enabled.
 
-    model = model.to(device=device, dtype=precision)
-    logger.info(f"Restored model from checkpoint")
-
-    # Optional context-window reduction (env-gated; before any cache setup).
+    FISH_QUANTIZED_WEIGHTS = path to the saved quantized state_dict. We build the
+    architecture WITHOUT reading the 8.6GB bf16 checkpoint (load_weights=False;
+    the non-persistent rope/mask buffers are recomputed deterministically in
+    __init__), then assign the small quantized tensors over the random params."""
+    qpath = os.environ.get("FISH_QUANTIZED_WEIGHTS", "").strip()
+    if not qpath:
+        return None
+    if not Path(qpath).exists():
+        logger.warning(f"[quant] FISH_QUANTIZED_WEIGHTS={qpath} not found; "
+                       "falling back to live quantization.")
+        return None
+    logger.info(f"[quant] loading pre-quantized weights from {qpath} "
+                "(skipping per-boot re-quant)")
+    t0 = time.time()
+    model = DualARTransformer.from_pretrained(checkpoint_path, load_weights=False)
     _override_max_seq_len(model)
+    sd = torch.load(qpath, map_location="cpu", weights_only=False)
+    missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
+    if unexpected:
+        logger.warning(f"[quant] {len(unexpected)} unexpected keys (e.g. "
+                       f"{unexpected[:3]}) ignored")
+    # Params not present in the saved file would stay randomly initialized -- guard.
+    real_missing = [k for k in missing if "freqs_cis" not in k and "causal_mask" not in k
+                    and "kv_cache" not in k]
+    if real_missing:
+        raise RuntimeError(f"[quant] pre-quantized file missing {len(real_missing)} "
+                           f"params (e.g. {real_missing[:3]}); regenerate it.")
+    model = model.to(device=device)  # no dtype cast: quantized tensors keep theirs
+    logger.info(f"[quant] pre-quantized model ready in {time.time() - t0:.1f}s")
+    return model
 
-    # Optional weight-only quantization (env-gated; no-op unless FISH_QUANTIZE set).
-    _apply_quantization(model)
+
+def init_model(checkpoint_path, device, precision, compile=False):
+    model = _load_prequantized(checkpoint_path, device)
+    if model is None:
+        model = DualARTransformer.from_pretrained(checkpoint_path, load_weights=True)
+        model = model.to(device=device, dtype=precision)
+        logger.info(f"Restored model from checkpoint")
+
+        # Optional context-window reduction (env-gated; before any cache setup).
+        _override_max_seq_len(model)
+
+        # Optional weight-only quantization (env-gated; no-op unless FISH_QUANTIZE set).
+        _apply_quantization(model)
 
     if isinstance(model, DualARTransformer):
         decode_one_token = decode_one_token_ar
