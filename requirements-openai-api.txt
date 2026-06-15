@@ -1,0 +1,10 @@
+# Extra deps for the OpenAI-compatible API layer (on top of `uv sync --extra cu128`).
+# Install with:  uv pip install -r requirements-openai-api.txt
+fastapi>=0.115
+python-multipart>=0.0.9
+# `openai` is only needed to RUN the client-compatibility tests, not the server.
+openai>=1.40
+# Optional: only needed for --quantize int8/int4 (weight-only). For int4 on
+# torch 2.8 the tile_packed (aten tinygemm) path is used; default plain/preshuffled
+# int4 needs torch>=2.11. int4 requires bf16 (server auto-disables --half).
+torchao>=0.17
