@@ -17,7 +17,10 @@ from fish_speech.utils.file import (
 )
 from fish_speech.utils.schema import ServeReferenceAudio
 
-_ID_PATTERN = re.compile(r"^[a-zA-Z0-9\-_ ]+$")
+# Allow any Unicode id (e.g. Devanagari, incl. combining marks that `\w` misses)
+# while keeping it safe as a `references/<id>/` folder name: block path
+# separators, control chars, and a leading dot ("." / ".." / hidden / traversal).
+_ID_PATTERN = re.compile(r"^(?!\.)[^/\\\x00-\x1f]+$")
 
 
 class ReferenceLoader:
@@ -56,7 +59,8 @@ class ReferenceLoader:
         if not _ID_PATTERN.match(id) or len(id) > 255:
             raise ValueError(
                 "Reference ID contains invalid characters or is too long. "
-                "Only alphanumeric, hyphens, underscores, and spaces are allowed."
+                "Allowed: Unicode letters/digits, hyphens, underscores, spaces "
+                "(no slashes or dots); max 255 chars."
             )
 
     def load_by_id(
