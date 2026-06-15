@@ -136,6 +136,17 @@ curl -X POST http://localhost:8770/v1/audio/speech \
 either `‹id›.wav` (+ optional `‹id›.lab`/`‹id›.txt` transcript) or a subfolder
 `‹id›/` containing audio + `.lab`. Already-registered ids are skipped.
 
+> **Transcripts matter — they are auto-generated if missing.** Voice cloning
+> conditions on a `(transcript, audio)` pair, and **multi-speaker `voice_map`
+> binding depends on it**: all per-speaker references are concatenated into one
+> blob and the model uses each reference's *text* to tell the speakers apart. An
+> empty transcript makes every speaker collapse to one voice. So when a voice is
+> enrolled without a transcript (bare audio in the folder, or `POST /v1/voices`
+> with no `text`), the server **auto-transcribes it with faster-whisper**
+> (`FISH_AUTO_TRANSCRIBE=1`, model `FISH_ASR_MODEL=small`, on `FISH_ASR_DEVICE=cpu`).
+> To backfill voices registered before this existed:
+> `python tools/backfill_transcripts.py` (idempotent — only fills empty `.lab`s).
+
 Inline per-request references (base64 audio + text, one per speaker) are also
 accepted via `/v1/tts`.
 

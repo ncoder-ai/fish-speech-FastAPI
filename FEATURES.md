@@ -121,15 +121,34 @@ Notes:
   `<|speaker:1|>[sigh] Fine, you were right.`
 - Without references, each speaker id gets its own model-chosen voice that stays
   stable for that id throughout the request.
-- To pin specific voices to speakers, clone voices first (next section) and feed
-  reference audio per speaker via the native `/v1/tts` endpoint.
+
+**Pin specific cloned voices to speakers — `voice_map`:** map each speaker id to
+a registered voice id in one request (no per-line stitching):
+```json
+{
+  "input": "<|speaker:0|>[low voice] Where were you?\n<|speaker:1|>I can explain.",
+  "voice_map": {"0": "grace2", "1": "david_attenborough_cc3"},
+  "response_format": "wav"
+}
+```
+
+> **⚠️ Each mapped voice MUST have a transcript.** voice_map concatenates every
+> speaker's reference audio into one blob; the model separates the speakers using
+> each reference's *text*. If a referenced voice has an empty `.lab` the speakers
+> collapse to a single voice (usually speaker 0). The server auto-transcribes
+> voices that lack a transcript (see §3), so this normally just works — but if you
+> add voices manually, give them a transcript or run
+> `python tools/backfill_transcripts.py`.
 
 ---
 
 ## 3. Voice cloning (custom voices)
 
-Provide a short, clean reference clip (~5–15 s) plus its exact transcript. Two
-ways:
+Provide a short, clean reference clip (~5–15 s) plus its exact transcript. The
+transcript is **not optional for quality** — it anchors the clone and is what
+makes multi-speaker `voice_map` work (§2). If you omit it, the server
+auto-transcribes the clip with faster-whisper (`FISH_AUTO_TRANSCRIBE=1`), so
+enrollment never leaves a voice with an empty transcript. Two ways:
 
 ### A. Register a reusable voice, then reference it by name
 

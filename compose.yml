@@ -33,6 +33,9 @@ services:
       FISH_API_KEY: "${FISH_API_KEY:-}"
       VOICES_DIR: "/app/voices"                   # auto-register + watch (mounted below)
       FISH_VOICES_SCAN_INTERVAL: "${FISH_VOICES_SCAN_INTERVAL:-30}"
+      FISH_AUTO_TRANSCRIBE: "${FISH_AUTO_TRANSCRIBE:-1}"  # ASR a transcript for voices that lack one
+      FISH_ASR_MODEL: "${FISH_ASR_MODEL:-small}"  # faster-whisper model (small=multilingual)
+      FISH_ASR_DEVICE: "${FISH_ASR_DEVICE:-cpu}"  # cpu | cuda:0 (cpu avoids VRAM contention)
       FISH_CONCURRENCY: "${FISH_CONCURRENCY:-1}"
       FISH_QUEUE_TIMEOUT: "${FISH_QUEUE_TIMEOUT:-300}"
     volumes:

@@ -51,6 +51,7 @@ from pydantic import BaseModel, Field
 
 from fish_speech.utils.file import AUDIO_EXTENSIONS
 from fish_speech.utils.schema import ServeReferenceAudio, ServeTTSRequest
+from tools import asr
 from tools.server.model_manager import ModelManager
 
 # ----------------------------------------------------------------------------
@@ -601,9 +602,18 @@ def _scan_voice_inbox(voices_dir: str) -> int:
 
     n = 0
     no_txt = 0
+    transcribed = 0
     for vid, audio, txt in candidates:
         if vid in existing:
             continue
+        # Voice cloning needs a transcript; the watched folder usually only has
+        # bare audio. Auto-transcribe so multi-speaker voice_map binding works
+        # (empty transcript -> speakers collapse to one voice). Falls back to ""
+        # if faster-whisper is unavailable.
+        if not txt:
+            txt = asr.transcribe(str(audio))
+            if txt:
+                transcribed += 1
         try:
             engine.add_reference(vid, str(audio), txt)
             existing.add(vid)
@@ -616,7 +626,12 @@ def _scan_voice_inbox(voices_dir: str) -> int:
         except Exception as e:
             logger.error(f"[voices] failed to register '{vid}': {e}")
     if n:
-        extra = f" ({no_txt} without transcript)" if no_txt else ""
+        bits = []
+        if transcribed:
+            bits.append(f"{transcribed} auto-transcribed")
+        if no_txt:
+            bits.append(f"{no_txt} without transcript")
+        extra = f" ({', '.join(bits)})" if bits else ""
         logger.info(f"[voices] registered {n} new voice(s) from {voices_dir}{extra}")
     return n
 
@@ -888,18 +903,31 @@ async def list_voices(request: Request):
 
 @app.post("/v1/voices")
 async def add_voice(request: Request, id: str = Form(...),
-                    text: str = Form(...), audio: UploadFile = File(...)):
+                    text: str = Form(""), audio: UploadFile = File(...)):
     await _check_auth(request)
     engine = MODEL_MANAGER.tts_inference_engine
     content = await audio.read()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+    suffix = Path(audio.filename or "").suffix.lower()
+    if suffix not in AUDIO_EXTENSIONS:
+        suffix = ".wav"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
         f.write(content)
         path = f.name
     try:
-        engine.add_reference(id, path, text)
+        # Transcript is strongly recommended (drives voice cloning + multi-speaker
+        # binding). If the caller omits it, auto-transcribe so the voice still
+        # clones well instead of registering a useless empty .lab.
+        transcript = (text or "").strip()
+        auto = False
+        if not transcript:
+            transcript = await asyncio.get_event_loop().run_in_executor(
+                None, asr.transcribe, path)
+            auto = bool(transcript)
+        engine.add_reference(id, path, transcript)
     finally:
         os.unlink(path)
-    return {"success": True, "voice": id}
+    return {"success": True, "voice": id, "transcript": transcript,
+            "auto_transcribed": auto}
 
 
 @app.delete("/v1/voices/{voice_id}")
