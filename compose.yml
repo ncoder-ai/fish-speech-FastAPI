@@ -27,6 +27,11 @@ services:
       FISH_DEVICE: "cuda:0"                       # in-container the chosen GPU is cuda:0
       FISH_LISTEN: "0.0.0.0:8770"
       FISH_QUANTIZE: "${FISH_QUANTIZE:-none}"     # none | int8 | int4
+      # Load pre-quantized weights (tools/quantize_save.py) to skip per-boot
+      # re-quant. Path is inside the container (checkpoints is mounted). Empty
+      # = quantize live each boot.
+      FISH_QUANTIZED_WEIGHTS: "${FISH_QUANTIZED_WEIGHTS:-}"
+      FISH_QUANT_GROUPSIZE: "${FISH_QUANT_GROUPSIZE:-128}"
       FISH_COMPILE: "${FISH_COMPILE:-1}"
       FISH_HALF: "${FISH_HALF:-1}"
       FISH_MAX_SEQ_LEN: "${FISH_MAX_SEQ_LEN:-0}"
