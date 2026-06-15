@@ -1,6 +1,56 @@
 name: fish-speech
 
 services:
+  # OpenAI-compatible TTS API (streaming, emotion tags, voice cloning,
+  # multi-speaker via voice_map). This is the DEFAULT service:
+  #   cp .env.example .env  &&  docker compose up -d --build
+  # Configure everything in .env (port, GPU id, quant level, voices folder, …).
+  # Requires the NVIDIA Container Toolkit on the host.
+  fish-openai:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: openai
+      args:
+        BACKEND: cuda
+        UV_EXTRA: "${FISH_UV_EXTRA:-cu128}"      # cu128 = torch 2.8 + CUDA 12.8
+        CUDA_VER: "${FISH_CUDA_VER:-12.8.1}"
+        UV_VERSION: "${UV_VERSION:-0.8.15}"
+        USER_UID: "${FISH_UID:-1000}"
+        USER_GID: "${FISH_GID:-1000}"
+    image: fish-speech-openai:cu128
+    container_name: fish-openai
+    restart: unless-stopped
+    ports:
+      - "${FISH_HOST_PORT:-8770}:8770"
+    environment:
+      FISH_DEVICE: "cuda:0"                       # in-container the chosen GPU is cuda:0
+      FISH_LISTEN: "0.0.0.0:8770"
+      FISH_QUANTIZE: "${FISH_QUANTIZE:-none}"     # none | int8 | int4
+      FISH_COMPILE: "${FISH_COMPILE:-1}"
+      FISH_HALF: "${FISH_HALF:-1}"
+      FISH_MAX_SEQ_LEN: "${FISH_MAX_SEQ_LEN:-0}"
+      FISH_API_KEY: "${FISH_API_KEY:-}"
+      VOICES_DIR: "/app/voices"                   # auto-register + watch (mounted below)
+      FISH_VOICES_SCAN_INTERVAL: "${FISH_VOICES_SCAN_INTERVAL:-30}"
+      FISH_AUTO_TRANSCRIBE: "${FISH_AUTO_TRANSCRIBE:-1}"  # ASR a transcript for voices that lack one
+      FISH_ASR_MODEL: "${FISH_ASR_MODEL:-small}"  # faster-whisper model (small=multilingual)
+      FISH_ASR_DEVICE: "${FISH_ASR_DEVICE:-cpu}"  # cpu | cuda:0 (cpu avoids VRAM contention)
+      FISH_CONCURRENCY: "${FISH_CONCURRENCY:-1}"
+      FISH_QUEUE_TIMEOUT: "${FISH_QUEUE_TIMEOUT:-300}"
+    volumes:
+      - "${FISH_CHECKPOINTS_HOST_DIR:-./checkpoints}:/app/checkpoints"
+      - "${FISH_VOICES_HOST_DIR:-./voices}:/app/voices"
+      - "${FISH_REFERENCES_HOST_DIR:-./references}:/app/references"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${FISH_GPU_ID:-0}"]   # physical GPU id on the host
+              capabilities: [gpu]
+
+  # --- Upstream fishaudio services (opt-in via profiles) ---
   webui:
     extends:
       file: compose.base.yml

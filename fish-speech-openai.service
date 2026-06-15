@@ -9,14 +9,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=fishspeech
-WorkingDirectory=/opt/fish-speech-FastAPI
-Environment=FISH_DEVICE=cuda:0
+User=nishant
+WorkingDirectory=/home/nishant/App/fish-speech
+Environment=FISH_DEVICE=cuda:3
 Environment=FISH_LISTEN=0.0.0.0:8770
 Environment=FISH_COMPILE=1
 Environment=FISH_HALF=1
 # Environment=FISH_API_KEY=change-me
-ExecStart=/opt/fish-speech-FastAPI/run_openai_api.sh start --fg
+ExecStart=/home/nishant/App/fish-speech/run_openai_api.sh start --fg
 Restart=on-failure
 RestartSec=10
 TimeoutStartSec=600

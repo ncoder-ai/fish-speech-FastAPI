@@ -2,7 +2,7 @@
 # Measure VRAM + RTF for baseline / int8 / int4 weight-only quant on GPU 3.
 # bf16 throughout (int4 tinygemm needs bf16). Compiled (fullgraph) each time.
 set -u
-cd "$(dirname "$0")/.."
+cd /home/nishant/App/fish-speech
 PY=.venv/bin/python
 RESULTS=/tmp/quant_results.txt
 : > "$RESULTS"
@@ -13,7 +13,7 @@ run_cfg() {
   : > "$log"
   echo "=========== $label (FISH_QUANTIZE='${quant}') ==========="
   FISH_QUANTIZE="$quant" $PY tools/openai_api_server.py \
-      --device cuda:0 --listen 0.0.0.0:8770 --compile \
+      --device cuda:3 --listen 0.0.0.0:8770 --compile \
       --concurrency 1 --queue-timeout 120 >> "$log" 2>&1 &
   local pid=$!
 

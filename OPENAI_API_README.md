@@ -12,7 +12,7 @@ audio formats, inline **emotion control**, and voice cloning.
 | Model | `checkpoints/s2-pro` (4B) + `codec.pth` decoder |
 | Env | `.venv` (Python 3.12, torch 2.8.0+cu128) |
 | Server | `tools/openai_api_server.py` |
-| Default device | `cuda:0` (most free VRAM) |
+| Default device | `cuda:3` (most free VRAM) |
 | Default port | `8770` (8080 was already taken) |
 | Steady-state speed | RTF ≈ 1.1 on one RTX 3090 with `--compile` |
 | VRAM | ~9 GB |
@@ -20,7 +20,7 @@ audio formats, inline **emotion control**, and voice cloning.
 ## Run
 
 ```bash
-cd fish-speech-FastAPI
+cd /home/nishant/App/fish-speech
 ./run_openai_api.sh start      # detached, waits until ready
 ./run_openai_api.sh status
 ./run_openai_api.sh logs
@@ -135,6 +135,17 @@ curl -X POST http://localhost:8770/v1/audio/speech \
 (default 30) the server scans it and registers any new voices. Each voice is
 either `‹id›.wav` (+ optional `‹id›.lab`/`‹id›.txt` transcript) or a subfolder
 `‹id›/` containing audio + `.lab`. Already-registered ids are skipped.
+
+> **Transcripts matter — they are auto-generated if missing.** Voice cloning
+> conditions on a `(transcript, audio)` pair, and **multi-speaker `voice_map`
+> binding depends on it**: all per-speaker references are concatenated into one
+> blob and the model uses each reference's *text* to tell the speakers apart. An
+> empty transcript makes every speaker collapse to one voice. So when a voice is
+> enrolled without a transcript (bare audio in the folder, or `POST /v1/voices`
+> with no `text`), the server **auto-transcribes it with faster-whisper**
+> (`FISH_AUTO_TRANSCRIBE=1`, model `FISH_ASR_MODEL=small`, on `FISH_ASR_DEVICE=cpu`).
+> To backfill voices registered before this existed:
+> `python tools/backfill_transcripts.py` (idempotent — only fills empty `.lab`s).
 
 Inline per-request references (base64 audio + text, one per speaker) are also
 accepted via `/v1/tts`.

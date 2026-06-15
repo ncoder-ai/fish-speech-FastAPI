@@ -2,17 +2,17 @@
 # Generate the 3 showcase scenes at int8 and int4 (bf16, compiled) for A/B vs
 # the existing 16-bit scenes. Saves to quant_scenes/<q>/.
 set -u
-cd "$(dirname "$0")/.."
+cd /home/nishant/App/fish-speech
 PY=.venv/bin/python
 ONLY="multivoice_dialogue,emotion_narration,multivoice_emotion_combined"
-OUTBASE=/tmp/quant_scenes
+OUTBASE=/mnt/truenas_public/fish_speech_tests/quant_scenes
 
 run() {
   local q="$1" log="logs/qscene_$1.log"
   : > "$log"
   echo "=========== scenes @ $q ==========="
   FISH_QUANTIZE="$q" $PY tools/openai_api_server.py \
-      --device cuda:0 --listen 0.0.0.0:8770 --compile \
+      --device cuda:3 --listen 0.0.0.0:8770 --compile \
       --concurrency 1 --queue-timeout 180 >> "$log" 2>&1 &
   local pid=$!
   for i in $(seq 1 140); do

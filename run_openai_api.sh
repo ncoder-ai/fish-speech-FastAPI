@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # ---- Config (override via environment) -------------------------------------
-DEVICE="${FISH_DEVICE:-cuda:0}"
+DEVICE="${FISH_DEVICE:-cuda:3}"
 LISTEN="${FISH_LISTEN:-0.0.0.0:8770}"
 LLAMA_CKPT="${FISH_LLAMA_CKPT:-checkpoints/s2-pro}"
 DECODER_CKPT="${FISH_DECODER_CKPT:-checkpoints/s2-pro/codec.pth}"
@@ -19,7 +19,12 @@ COMPILE="${FISH_COMPILE:-1}"          # 1 = torch.compile (faster steady state)
 HALF="${FISH_HALF:-1}"                # 1 = fp16 (auto-disabled for int4)
 QUANTIZE="${FISH_QUANTIZE:-none}"     # none | int8 (~12.8GB) | int4 (~11GB, bf16)
 MAX_SEQ_LEN="${FISH_MAX_SEQ_LEN:-0}"  # 0 = model default (8192); e.g. 4096 = lower peak VRAM
-VOICES_DIR="${VOICES_DIR:-}"          # folder to auto-register + watch voices from (e.g. /path/to/voices)
+VOICES_DIR="${VOICES_DIR:-}"          # folder to auto-register + watch voices from (e.g. /home/nishant/apps/voices)
+# Auto-transcribe voices enrolled without a transcript (needed for cloning +
+# multi-speaker voice_map binding). Read directly by tools/asr.py; exported here.
+export FISH_AUTO_TRANSCRIBE="${FISH_AUTO_TRANSCRIBE:-1}"   # 1=on 0=off
+export FISH_ASR_MODEL="${FISH_ASR_MODEL:-small}"          # small=multilingual; small.en=English-only
+export FISH_ASR_DEVICE="${FISH_ASR_DEVICE:-cpu}"          # cpu | cuda:N
 # export FISH_API_KEY=... to require a bearer token.
 
 PY=".venv/bin/python"

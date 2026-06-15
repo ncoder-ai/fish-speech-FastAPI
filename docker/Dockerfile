@@ -396,3 +396,38 @@ RUN uv sync --extra ${UV_EXTRA} --dev
 
 # Default to bash for development
 ENTRYPOINT ["/bin/bash"]
+
+##############################################################
+# OpenAI-compatible API server
+#   streaming + emotion tags + voice cloning + multi-speaker (voice_map)
+#   build:  --target openai --build-arg UV_EXTRA=cu128 (matches torch 2.8+cu128)
+##############################################################
+FROM app-base AS openai
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+
+# Extra runtime deps for the OpenAI API layer (on top of the synced env).
+RUN --mount=type=cache,target=/tmp/uv-cache,uid=${USER_UID},gid=${USER_GID} \
+    uv pip install "fastapi>=0.115" "python-multipart>=0.0.9" "torchao>=0.17" \
+                   "faster-whisper>=1.1"
+
+# Defaults — override via docker-compose env / .env. In-container the chosen GPU
+# is ALWAYS cuda:0 (the host GPU is selected via device_ids/NVIDIA_VISIBLE_DEVICES).
+ENV FISH_DEVICE=cuda:0 \
+    FISH_LISTEN=0.0.0.0:8770 \
+    FISH_COMPILE=1 \
+    FISH_HALF=0 \
+    FISH_QUANTIZE=int8 \
+    FISH_MAX_SEQ_LEN=0 \
+    FISH_AUTO_TRANSCRIBE=1 \
+    FISH_ASR_MODEL=small \
+    FISH_ASR_DEVICE=cpu \
+    HF_HOME=/app/.hf-cache
+
+EXPOSE 8770
+
+# start-period is generous: first boot may download 11GB of checkpoints + spend
+# ~2min on torch.compile warmup before /health is green.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=5 \
+    CMD curl -f http://localhost:8770/health || exit 1
+
+ENTRYPOINT ["bash", "/app/openai-entrypoint.sh"]
