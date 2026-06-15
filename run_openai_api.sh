@@ -19,6 +19,12 @@ COMPILE="${FISH_COMPILE:-1}"          # 1 = torch.compile (faster steady state)
 HALF="${FISH_HALF:-1}"                # 1 = fp16 (auto-disabled for int4)
 QUANTIZE="${FISH_QUANTIZE:-none}"     # none | int8 (~12.8GB) | int4 (~11GB, bf16)
 MAX_SEQ_LEN="${FISH_MAX_SEQ_LEN:-0}"  # 0 = model default (8192); e.g. 4096 = lower peak VRAM
+# Optional pre-quantized weights: load these instead of re-quantizing every boot.
+# If set but the file is missing, it's generated ONCE from the bf16 checkpoint
+# below (using THIS box's torch/torchao/GPU, so it's always compatible) and then
+# persists in the (mounted) checkpoints dir. export FISH_QUANTIZED_WEIGHTS=...
+export FISH_QUANTIZED_WEIGHTS="${FISH_QUANTIZED_WEIGHTS:-}"
+export FISH_QUANT_GROUPSIZE="${FISH_QUANT_GROUPSIZE:-128}"  # int4 group size
 VOICES_DIR="${VOICES_DIR:-}"          # folder to auto-register + watch voices from (e.g. /home/nishant/apps/voices)
 # Auto-transcribe voices enrolled without a transcript (needed for cloning +
 # multi-speaker voice_map binding). Read directly by tools/asr.py; exported here.
@@ -54,8 +60,20 @@ build_args() {
   return 0   # never let a false [[ ]] && ... above abort under `set -e`
 }
 
+ensure_prequant() {
+  # Generate pre-quantized weights once if a path is configured but missing.
+  # Done with the local stack so the saved file is always loadable here.
+  [[ -n "$FISH_QUANTIZED_WEIGHTS" && "$QUANTIZE" != "none" \
+     && ! -f "$FISH_QUANTIZED_WEIGHTS" ]] || return 0
+  echo "Pre-quantized weights missing ($FISH_QUANTIZED_WEIGHTS); generating once ($QUANTIZE)…"
+  FISH_QUANTIZE="$QUANTIZE" DEV="$DEVICE" \
+    "$PY" tools/quantize_save.py "$LLAMA_CKPT" "$FISH_QUANTIZED_WEIGHTS"
+  echo "Pre-quantized weights ready: $FISH_QUANTIZED_WEIGHTS"
+}
+
 case "${1:-start}" in
   start)
+    ensure_prequant
     build_args
     if [[ "${2:-}" == "--fg" ]]; then
       exec "$PY" "${ARGS[@]}"
