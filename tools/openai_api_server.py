@@ -482,8 +482,15 @@ async def lifespan(app: FastAPI):
     use_half = ARGS.half
     if ARGS.quantize and ARGS.quantize != "none":
         os.environ["FISH_QUANTIZE"] = ARGS.quantize
-        if ARGS.quantize == "int4" and ARGS.half:
-            logger.warning("int4 requires bf16; overriding --half -> running bf16.")
+        # torchao weight-only quant must run on a bf16 model. With fp16 (--half)
+        # the int8/int4 dequant path degrades the logits enough that the model
+        # stops emitting the stop token -> runaway generation to the context cap
+        # -> OOM. Force bf16 whenever any quant is enabled (not just int4).
+        if ARGS.half:
+            logger.warning(
+                f"{ARGS.quantize} weight-only quant requires bf16; "
+                "overriding --half -> running bf16."
+            )
             use_half = False
     if ARGS.max_seq_len and ARGS.max_seq_len > 0:
         os.environ["FISH_MAX_SEQ_LEN"] = str(ARGS.max_seq_len)
