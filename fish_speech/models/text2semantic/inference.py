@@ -738,7 +738,11 @@ def generate_long(
             # raising, drop the OLDEST turn pairs (keeping the system message,
             # which holds the reference voice, plus the most recent turns) until
             # the prompt fits. Behaviour is unchanged until the limit is reached.
-            budget = max_length - 2048
+            # Reserve headroom for the generated tokens, but clamp it so a small
+            # max_seq_len (e.g. --max-seq-len 2048) can't drive the budget to <=0
+            # (which would reject even the warmup prompt). Always leave >= half
+            # the context for the prompt.
+            budget = max_length - min(2048, max_length // 2)
             while True:
                 conversation_gen = deepcopy(conversation)
                 conversation_gen.append(
