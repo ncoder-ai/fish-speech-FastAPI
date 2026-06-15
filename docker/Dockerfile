@@ -414,8 +414,8 @@ RUN --mount=type=cache,target=/tmp/uv-cache,uid=${USER_UID},gid=${USER_GID} \
 ENV FISH_DEVICE=cuda:0 \
     FISH_LISTEN=0.0.0.0:8770 \
     FISH_COMPILE=1 \
-    FISH_HALF=1 \
-    FISH_QUANTIZE=none \
+    FISH_HALF=0 \
+    FISH_QUANTIZE=int8 \
     FISH_MAX_SEQ_LEN=0 \
     HF_HOME=/app/.hf-cache
 
