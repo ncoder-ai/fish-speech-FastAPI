@@ -289,8 +289,15 @@ def _iter_chunk_audio(
     - If the input ALREADY has <|speaker:N|> turns (multi-speaker dialogue),
       pass it straight through -- generate_long groups the turns by
       `chunk_length` and each speaker keeps its own voice.
-    - Otherwise tag every sentence with a single speaker so the same batching
-      kicks in for a single narrator.
+    - Otherwise group sentences into ~chunk_length chunks and tag ONE speaker
+      turn per chunk (single narrator).
+
+    IMPORTANT: do NOT tag every sentence as its own turn -- the model treats each
+    turn as a separate conversational utterance and inserts a pause between them,
+    so per-sentence tagging makes single-narrator playback choppy (~3x the dead
+    air). One turn per chunk keeps narration continuous within the chunk; raise
+    `chunk_length` for fewer/longer chunks (fewer pauses) at the cost of a larger
+    per-batch generation.
 
     Either way each batch is generated against the SHARED running conversation
     -> bounded per-batch decode AND a consistent voice (no seed/reference
@@ -302,10 +309,10 @@ def _iter_chunk_audio(
     if _SPEAKER_RE.search(text):
         tagged = text  # caller drives the speaker turns
     else:
-        sentences = [p.strip() for p in _SENT_SPLIT.split(text.strip()) if p and p.strip()]
-        if not sentences:
+        chunks = _split_text(text, max_chars=max(100, min(1000, r.chunk_length)))
+        if not chunks:
             return
-        tagged = "\n".join(f"{_SPEAKER_TAG}{s}" for s in sentences)
+        tagged = "\n".join(f"{_SPEAKER_TAG}{c}" for c in chunks)
 
     # streaming=True makes the engine decode + emit each batch separately
     # (bounded VRAM); max_new_tokens=0 lets each short batch end naturally.
