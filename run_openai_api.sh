@@ -31,6 +31,10 @@ VOICES_DIR="${VOICES_DIR:-}"          # folder to auto-register + watch voices f
 export FISH_AUTO_TRANSCRIBE="${FISH_AUTO_TRANSCRIBE:-1}"   # 1=on 0=off
 export FISH_ASR_MODEL="${FISH_ASR_MODEL:-small}"          # small=multilingual; small.en=English-only
 export FISH_ASR_DEVICE="${FISH_ASR_DEVICE:-cpu}"          # cpu | cuda:N
+# Incremental decode for streaming requests: emit audio every N tokens so the
+# first audio arrives in ~1.5s instead of ~12s on long turns. 0 = off. Read by
+# tools/openai_api_server.py at import; only affects streaming requests.
+export FISH_STREAM_CHUNK_TOKENS="${FISH_STREAM_CHUNK_TOKENS:-32}"
 # Persist torch.compile (Inductor) + Triton kernel caches across restarts so a
 # warm start skips the ~4-min CPU kernel recompile. Cache is keyed on
 # torch/triton/GPU-arch/code; a bump triggers ONE cold recompile, fast after.

@@ -193,6 +193,9 @@ def decode_n_tokens(
     audio_masks: torch.Tensor,
     audio_parts: torch.Tensor,
     decode_one_token=decode_one_token_ar,
+    stream_emit=None,
+    stream_chunk_tokens: int = 0,
+    first_token: torch.Tensor = None,
 ):
     # Rolling window for RAS (Repetition Aware Sampling)
     previous_tokens = torch.zeros(
@@ -205,6 +208,16 @@ def decode_n_tokens(
 
     # [MODIFIED] Pre-fetch ID for efficiency loop
     im_end_id = model.tokenizer.get_token_id(IM_END_TOKEN)
+
+    # Incremental streaming: collect the audio-codebook rows of tokens not yet
+    # flushed, and emit them every `stream_chunk_tokens`. The first token (from
+    # prefill) is the first audio frame, so seed `pending` with it so the emitted
+    # codes match the per-batch path (y[1:, prompt_length:-1]). Emission changes
+    # only WHEN audio is decoded downstream -- the tokens generated are identical.
+    streaming = bool(stream_emit) and stream_chunk_tokens > 0
+    pending = []
+    if streaming and first_token is not None:
+        pending.append(first_token.view(model.config.num_codebooks + 1, -1)[1:])
 
     for i in tqdm(range(num_new_tokens)):
         with sdpa_kernel(SDPBackend.MATH):
@@ -230,8 +243,20 @@ def decode_n_tokens(
         ]
         new_tokens.append(next_token)
 
-        if cur_token[0, 0, -1] == im_end_id:
+        is_end = cur_token[0, 0, -1] == im_end_id
+        # Only stream real audio frames (skip the terminal im_end frame, which the
+        # per-batch path drops via [:-1]).
+        if streaming and not is_end:
+            pending.append(next_token.view(model.config.num_codebooks + 1, -1)[1:])
+            if len(pending) >= stream_chunk_tokens:
+                stream_emit(torch.cat(pending, dim=1).clone())
+                pending = []
+
+        if is_end:
             break
+
+    if streaming and pending:
+        stream_emit(torch.cat(pending, dim=1).clone())
 
     del cur_token
 
@@ -249,6 +274,8 @@ def generate(
     audio_parts: torch.Tensor,
     decode_one_token=decode_one_token_ar,
     num_samples: int = 1,
+    stream_emit=None,
+    stream_chunk_tokens: int = 0,
     **sampling_kwargs,
 ):
     """
@@ -349,6 +376,9 @@ def generate(
         audio_masks=audio_masks,
         audio_parts=audio_parts,
         decode_one_token=decode_one_token,
+        stream_emit=stream_emit,
+        stream_chunk_tokens=stream_chunk_tokens,
+        first_token=first_token,
     )
     seq = seq[:, : T + 1 + x.size(1)]
     seq[:, T + 1 :] = x
@@ -569,7 +599,7 @@ def decode_to_audio(codes, codec):
 
 @dataclass
 class GenerateResponse:
-    action: Literal["sample", "next"]
+    action: Literal["sample", "next", "stream", "stream_end"]
     codes: Optional[torch.Tensor] = None
     text: Optional[str] = None
 
@@ -661,6 +691,8 @@ def generate_long(
     prompt_text: Optional[Union[str, list[str]]] = None,
     prompt_tokens: Optional[Union[torch.Tensor, list[torch.Tensor]]] = None,
     cancel_event=None,
+    stream_emit=None,
+    stream_chunk_tokens: int = 0,
 ):
     # Optional threading.Event: when set (e.g. the HTTP client disconnected) the
     # batch loop stops after the current batch so the worker is freed promptly
@@ -848,6 +880,8 @@ def generate_long(
                 temperature=temperature,
                 top_p=top_p,
                 top_k=top_k,
+                stream_emit=stream_emit,
+                stream_chunk_tokens=stream_chunk_tokens,
             )
 
             if sample_idx == 0 and batch_idx == 0 and compile:
@@ -892,7 +926,13 @@ def generate_long(
                 )
             )
 
-            yield GenerateResponse(action="sample", codes=codes, text=batch_text)
+            if stream_emit and stream_chunk_tokens > 0:
+                # Audio for this batch was already flushed incrementally via
+                # stream_emit during generate(); just mark the batch boundary so
+                # the consumer flushes its held margin and resets per-batch state.
+                yield GenerateResponse(action="stream_end", text=batch_text)
+            else:
+                yield GenerateResponse(action="sample", codes=codes, text=batch_text)
 
             # Cleanup
             del y, encoded
@@ -951,6 +991,16 @@ def launch_thread_safe_queue(
 
             kwargs = item.request
             response_queue = item.response_queue
+
+            # Incremental streaming: install a callback that pushes partial audio
+            # codes onto THIS request's queue, in order, from the worker thread.
+            if kwargs.get("stream_chunk_tokens"):
+                def _stream_emit(codes, _rq=response_queue):
+                    _rq.put(WrappedGenerateResponse(
+                        status="success",
+                        response=GenerateResponse(action="stream", codes=codes),
+                    ))
+                kwargs = {**kwargs, "stream_emit": _stream_emit}
 
             try:
                 for chunk in generate_long(
