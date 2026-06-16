@@ -851,7 +851,16 @@ def generate_long(
             )
 
             if sample_idx == 0 and batch_idx == 0 and compile:
-                logger.info(f"Compilation time: {time.perf_counter() - t0:.2f} seconds")
+                # NOTE: this is the FIRST BATCH's wall time, not pure compile time.
+                # torch.compile only compiles ONCE (at warmup) and never recompiles
+                # per scene shape (verified: tools/test_recompiles.py). On a warm
+                # process this value is just generation time for batch 0 (a long
+                # batch is naturally 20-30s of GENERATION). Do not read it as
+                # "compilation" — that misdiagnoses generation latency as recompiles.
+                logger.info(
+                    f"First-batch wall time: {time.perf_counter() - t0:.2f}s "
+                    "(generation; includes one-time torch.compile only on a cold start)"
+                )
 
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
