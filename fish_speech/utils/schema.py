@@ -97,6 +97,11 @@ class ServeTTSRequest(BaseModel):
     normalize: bool = True
     # not usually used below
     streaming: bool = False
+    # Incremental decode within each batch: emit audio every N generated tokens
+    # instead of waiting for the whole batch to finish (cuts time-to-first-audio
+    # on long turns). 0 = off (decode per batch, original behaviour). Generation
+    # is identical either way; only WHEN audio is decoded/flushed changes.
+    stream_chunk_tokens: int = 0
     max_new_tokens: int = 1024
     top_p: Annotated[float, Field(ge=0.1, le=1.0, strict=True)] = 0.8
     repetition_penalty: Annotated[float, Field(ge=0.9, le=2.0, strict=True)] = 1.1

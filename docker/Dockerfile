@@ -424,6 +424,7 @@ ENV FISH_DEVICE=cuda:0 \
     TORCHINDUCTOR_CACHE_DIR=/app/.torch-cache/inductor \
     TRITON_CACHE_DIR=/app/.torch-cache/triton \
     TORCHINDUCTOR_FX_GRAPH_CACHE=1 \
+    FISH_STREAM_CHUNK_TOKENS=32 \
     HF_HOME=/app/.hf-cache
 
 EXPOSE 8770

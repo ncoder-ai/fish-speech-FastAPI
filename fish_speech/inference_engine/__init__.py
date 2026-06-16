@@ -87,6 +87,26 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
 
         segments = []
 
+        # Incremental-streaming decode state (action="stream"/"stream_end").
+        # We re-decode the current batch's accumulated codes on each chunk and
+        # emit only the newly-decoded audio, holding back a small right MARGIN of
+        # frames so each emitted boundary was decoded with right-context (no
+        # clicks). The margin is flushed at "stream_end". Generation is unchanged;
+        # this only governs WHEN audio is decoded/emitted.
+        import os
+
+        margin_frames = int(os.environ.get("FISH_STREAM_MARGIN_FRAMES", "8"))
+        batch_codes = None
+        emitted = 0  # samples already emitted for the current batch
+
+        def _emit_segment(seg: np.ndarray):
+            segments.append(seg)
+            if req.streaming:
+                return InferenceResult(
+                    code="segment", audio=(sample_rate, seg), error=None
+                )
+            return None
+
         while True:
             # Get the response from the LLAMA model
             wrapped_result: WrappedGenerateResponse = response_queue.get()
@@ -109,18 +129,47 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
                 )
 
             result: GenerateResponse = wrapped_result.response
-            if result.action != "next":
-                segment = self.get_audio_segment(result)
 
-                if req.streaming:  # Used only by the API server
+            if result.action == "stream":
+                # Append new codes, re-decode the batch prefix, emit the delta
+                # minus a right margin (held for clean boundaries).
+                batch_codes = (
+                    result.codes
+                    if batch_codes is None
+                    else torch.cat([batch_codes, result.codes], dim=1)
+                )
+                audio = self._decode_codes(batch_codes)
+                spf = max(1, len(audio) // max(1, batch_codes.size(1)))
+                keep = len(audio) - margin_frames * spf
+                if keep > emitted:
+                    r = _emit_segment(audio[emitted:keep])
+                    emitted = keep
+                    if r is not None:
+                        yield r
+
+            elif result.action == "stream_end":
+                # Flush the held margin (final decode has the true batch end).
+                if batch_codes is not None:
+                    audio = self._decode_codes(batch_codes)
+                    if len(audio) > emitted:
+                        r = _emit_segment(audio[emitted:])
+                        if r is not None:
+                            yield r
+                batch_codes = None
+                emitted = 0
+
+            elif result.action == "next":
+                break
+
+            else:  # "sample" — per-batch decode (non-incremental path)
+                segment = self.get_audio_segment(result)
+                if req.streaming:
                     yield InferenceResult(
                         code="segment",
                         audio=(sample_rate, segment),
                         error=None,
                     )
                 segments.append(segment)
-            else:
-                break
 
         # Clean up the memory
         if torch.cuda.is_available():
@@ -170,6 +219,7 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
             prompt_tokens=prompt_tokens,
             prompt_text=prompt_texts,
             cancel_event=cancel_event,
+            stream_chunk_tokens=req.stream_chunk_tokens,
         )
 
         # Create a queue to get the response
@@ -185,17 +235,16 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
 
         return response_queue
 
+    def _decode_codes(self, codes) -> np.ndarray:
+        """Decode a VQ-code tensor to a float32 numpy waveform."""
+        with autocast_exclude_mps(
+            device_type=self.decoder_model.device.type, dtype=self.precision
+        ):
+            segment = self.decode_vq_tokens(codes=codes)
+        return segment.float().cpu().numpy()
+
     def get_audio_segment(self, result: GenerateResponse) -> np.ndarray:
         """
         Decode the VQ tokens to audio.
         """
-
-        # Don't use autocast on MPS devices
-        with autocast_exclude_mps(
-            device_type=self.decoder_model.device.type, dtype=self.precision
-        ):
-            # Decode the symbolic tokens to audio
-            segment = self.decode_vq_tokens(codes=result.codes)
-
-        # Convert the audio to numpy
-        return segment.float().cpu().numpy()
+        return self._decode_codes(result.codes)

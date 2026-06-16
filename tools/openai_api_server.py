@@ -75,6 +75,11 @@ _OPENAI_VOICES = {"alloy", "echo", "fable", "onyx", "nova", "shimmer", "ash",
 # OpenAI response_format -> internal handling
 _PCM_RATE_FALLBACK = 44100
 
+# Default incremental-decode chunk size for STREAMING requests (env-tunable).
+# 0 = off (decode per batch). 32 ≈ first audio in ~1.5s on long turns instead of
+# ~12s. A request can override via SpeechRequest.stream_chunk_tokens.
+_STREAM_CHUNK_DEFAULT = int(os.environ.get("FISH_STREAM_CHUNK_TOKENS", "0") or "0")
+
 # Fish-Speech S2-Pro emotion / prosody / tone tags (inline in `input`).
 # S2-Pro accepts 15k+ free-form tags; these are the documented built-ins.
 EMOTION_TAGS = [
@@ -133,6 +138,11 @@ class SpeechRequest(BaseModel):
     # (1024 tokens is only ~47s), which silently truncates longer text.
     max_new_tokens: int = 0
     normalize: bool = True
+    # Incremental decode for streaming: emit audio every N generated tokens
+    # instead of waiting for the whole batch (first audio in ~1.5s vs ~12s on
+    # long turns). None = use the server default (FISH_STREAM_CHUNK_TOKENS).
+    # Only applies to streaming requests; generation is unchanged either way.
+    stream_chunk_tokens: Optional[int] = None
 
 
 # ----------------------------------------------------------------------------
@@ -290,6 +300,11 @@ def _build_tts_request(r: SpeechRequest, text: str, streaming: bool,
         # Non-OpenAI voice name -> treat as a registered reference id.
         reference_id = r.voice
 
+    # Incremental decode only helps when we're streaming to the client; for
+    # non-streaming requests it just adds re-decode overhead, so force it off.
+    sct = r.stream_chunk_tokens if r.stream_chunk_tokens is not None else _STREAM_CHUNK_DEFAULT
+    stream_chunk_tokens = sct if streaming else 0
+
     # Fish internal format is wav/pcm/mp3/opus; we encode ourselves, so ask the
     # engine for raw audio (format="wav") and never let it constrain us.
     return ServeTTSRequest(
@@ -301,6 +316,7 @@ def _build_tts_request(r: SpeechRequest, text: str, streaming: bool,
         seed=seed if seed is not None else r.seed,
         normalize=r.normalize,
         streaming=streaming,
+        stream_chunk_tokens=stream_chunk_tokens,
         max_new_tokens=max_new_tokens if max_new_tokens is not None else r.max_new_tokens,
         top_p=r.top_p,
         repetition_penalty=r.repetition_penalty,

@@ -48,6 +48,9 @@ services:
       TORCHINDUCTOR_CACHE_DIR: "/app/.torch-cache/inductor"
       TRITON_CACHE_DIR: "/app/.torch-cache/triton"
       TORCHINDUCTOR_FX_GRAPH_CACHE: "1"
+      # Incremental decode for streaming: first audio in ~1.5s vs ~12s on long
+      # turns (0 = off). Only affects streaming requests; generation unchanged.
+      FISH_STREAM_CHUNK_TOKENS: "${FISH_STREAM_CHUNK_TOKENS:-32}"
     volumes:
       - "${FISH_CHECKPOINTS_HOST_DIR:-./checkpoints}:/app/checkpoints"
       - "${FISH_VOICES_HOST_DIR:-./voices}:/app/voices"
