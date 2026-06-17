@@ -11,10 +11,10 @@ Wants=network-online.target
 Type=simple
 User=nishant
 WorkingDirectory=/home/nishant/App/fish-speech
+# Model/precision/quant config is read from the repo .env by run_openai_api.sh
 Environment=FISH_DEVICE=cuda:3
 Environment=FISH_LISTEN=0.0.0.0:8770
 Environment=FISH_COMPILE=1
-Environment=FISH_HALF=1
 # Environment=FISH_API_KEY=change-me
 ExecStart=/home/nishant/App/fish-speech/run_openai_api.sh start --fg
 Restart=on-failure
