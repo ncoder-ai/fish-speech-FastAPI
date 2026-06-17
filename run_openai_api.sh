@@ -9,6 +9,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# Load box-local overrides if present (gitignored; mirrors the container's .env).
+# This is how bare-metal hosts pin their config (quant, device, streaming, etc.)
+# persistently. Not present inside the container image (.env is dockerignored), so
+# the containerized path keeps using compose-provided env.
+if [[ -f .env ]]; then set -a; source ./.env; set +a; fi
+
 # ---- Config (override via environment) -------------------------------------
 DEVICE="${FISH_DEVICE:-cuda:3}"
 LISTEN="${FISH_LISTEN:-0.0.0.0:8770}"
