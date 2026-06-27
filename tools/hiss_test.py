@@ -29,7 +29,7 @@ from fish_speech.utils.schema import ServeTTSRequest  # noqa: E402
 from tools.server.model_manager import ModelManager  # noqa: E402
 
 DEV = os.environ.get("DEV", "cuda:3")
-OUT = os.environ.get("OUT", f"/mnt/truenas_public/hiss_{QUANT}.wav")
+OUT = os.environ.get("OUT", f"/tmp/hiss_{QUANT}.wav")
 
 # Sibilant/fricative-heavy — s/sh/z/f/st/ch, where low-bit hiss shows worst.
 text = ("She sells seashells by the seashore, while the sixth sheikh's sixth sheep "

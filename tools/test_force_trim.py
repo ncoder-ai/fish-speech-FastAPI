@@ -14,7 +14,7 @@ import time
 
 import httpx
 
-OUT = "/mnt/truenas_public/fish_speech_tests/force_trim_long_narration.wav"
+OUT = "/tmp/fish_speech_tests/force_trim_long_narration.wav"
 
 # ~95 short sentences -> ~95 turns -> guaranteed to exceed the context budget.
 _POOL = [

@@ -21,7 +21,7 @@ from fish_speech.utils.schema import ServeReferenceAudio, ServeTTSRequest  # noq
 from tools.server.model_manager import ModelManager  # noqa: E402
 
 DEV = os.environ.get("DEV", "cuda:3")
-OUT = Path(os.environ.get("OUT", "/mnt/truenas_public"))
+OUT = Path(os.environ.get("OUT", "/tmp"))
 PREFIX = os.environ.get("PREFIX", "ab2")
 OUT.mkdir(parents=True, exist_ok=True)
 

@@ -2,7 +2,7 @@
 # Measure VRAM + RTF for baseline / int8 / int4 weight-only quant on GPU 3.
 # bf16 throughout (int4 tinygemm needs bf16). Compiled (fullgraph) each time.
 set -u
-cd /home/nishant/App/fish-speech
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY=.venv/bin/python
 RESULTS=/tmp/quant_results.txt
 : > "$RESULTS"

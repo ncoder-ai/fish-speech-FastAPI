@@ -20,7 +20,7 @@ audio formats, inline **emotion control**, and voice cloning.
 ## Run
 
 ```bash
-cd /home/nishant/App/fish-speech
+cd /path/to/fish-speech
 ./run_openai_api.sh start      # detached, waits until ready
 ./run_openai_api.sh status
 ./run_openai_api.sh logs

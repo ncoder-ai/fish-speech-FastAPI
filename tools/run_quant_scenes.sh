@@ -2,10 +2,10 @@
 # Generate the 3 showcase scenes at int8 and int4 (bf16, compiled) for A/B vs
 # the existing 16-bit scenes. Saves to quant_scenes/<q>/.
 set -u
-cd /home/nishant/App/fish-speech
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY=.venv/bin/python
 ONLY="multivoice_dialogue,emotion_narration,multivoice_emotion_combined"
-OUTBASE=/mnt/truenas_public/fish_speech_tests/quant_scenes
+OUTBASE="${OUTBASE:-/tmp/fish_speech_tests/quant_scenes}"
 
 run() {
   local q="$1" log="logs/qscene_$1.log"
