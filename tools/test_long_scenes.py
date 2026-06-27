@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Long-scene tests: multi-voice dialogue + inline emotion tags, 400-500 words each.
-Saves generated audio to /mnt/truenas_public/fish_speech_tests and validates it.
+Saves generated audio to /tmp/fish_speech_tests and validates it.
 
 Usage:
   .venv/bin/python tools/test_long_scenes.py --base-url http://localhost:8770
@@ -13,7 +13,7 @@ import time
 
 import httpx
 
-OUT_DIR = "/mnt/truenas_public/fish_speech_tests"
+OUT_DIR = "/tmp/fish_speech_tests"
 
 # --- Scene A: multi-voice dialogue, 3 speakers (~460 words) -------------------
 SCENE_MULTIVOICE = (

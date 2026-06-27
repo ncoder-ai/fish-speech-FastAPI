@@ -9,7 +9,7 @@ import httpx
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8770"
 LABEL = sys.argv[2] if len(sys.argv) > 2 else "run"
-OUT = f"/mnt/truenas_public/fish_speech_tests/quant/{LABEL}.wav"
+OUT = f"/tmp/fish_speech_tests/quant/{LABEL}.wav"
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 
 TEXT = (

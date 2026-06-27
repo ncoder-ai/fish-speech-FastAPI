@@ -2,16 +2,16 @@
 """Measure streaming latency: when does the header arrive vs the first AUDIO chunk?
 
 A long first turn => big batch 0 => first audio is delayed by batch-0 generation
-time even though we 'stream'. This is what makes Kahani time out before any audio.
+time even though we 'stream'. This is what makes long-narration clients time out before any audio.
 """
 import os
 import time
 
 import requests
 
-BASE = os.environ.get("BASE", "http://172.16.23.180:8770")
+BASE = os.environ.get("BASE", "http://localhost:8770")
 
-# Kahani-like scene: a LONG narration first turn (big batch 0), then dialogue.
+# Long-narration scene: a LONG narration first turn (big batch 0), then dialogue.
 long_turn = ("Radhika repeated the name slowly, testing the unfamiliar syllables "
              "on her tongue as she dried her hands on the worn kitchen towel, her "
              "mind already drifting toward the gleaming cabinets and the modern "

@@ -31,7 +31,7 @@ MAX_SEQ_LEN="${FISH_MAX_SEQ_LEN:-0}"  # 0 = model default (8192); e.g. 4096 = lo
 # persists in the (mounted) checkpoints dir. export FISH_QUANTIZED_WEIGHTS=...
 export FISH_QUANTIZED_WEIGHTS="${FISH_QUANTIZED_WEIGHTS:-}"
 export FISH_QUANT_GROUPSIZE="${FISH_QUANT_GROUPSIZE:-128}"  # int4 group size
-VOICES_DIR="${VOICES_DIR:-}"          # folder to auto-register + watch voices from (e.g. /home/nishant/apps/voices)
+VOICES_DIR="${VOICES_DIR:-}"          # folder to auto-register + watch voices from (e.g. /path/to/voices)
 # Auto-transcribe voices enrolled without a transcript (needed for cloning +
 # multi-speaker voice_map binding). Read directly by tools/asr.py; exported here.
 export FISH_AUTO_TRANSCRIBE="${FISH_AUTO_TRANSCRIBE:-1}"   # 1=on 0=off

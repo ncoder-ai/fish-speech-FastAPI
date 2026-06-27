@@ -14,7 +14,7 @@ import requests
 import soundfile as sf
 
 BASE = os.environ.get("BASE", "http://localhost:8770")
-OUT = os.environ.get("OUT", "/mnt/truenas_public/int8_baseline.wav")
+OUT = os.environ.get("OUT", "/tmp/int8_baseline.wav")
 LABEL = os.environ.get("LABEL", "int8")
 
 long_turn = ("The morning market was already crowded when the two travelers arrived, "
