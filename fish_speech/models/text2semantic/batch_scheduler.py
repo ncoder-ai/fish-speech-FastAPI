@@ -48,6 +48,9 @@ TOP_K = 30
 # Attention length granularity (cache slots). Rows attend to the first
 # round_up(longest active position + 1, KV_LEN_ALIGN) slots.
 KV_LEN_ALIGN = 128
+# Reuse a slot's cached prefix across a request's text batches
+# (FISH_PREFIX_REUSE=0 disables it).
+PREFIX_REUSE = os.environ.get("FISH_PREFIX_REUSE", "1") != "0"
 
 
 @dataclass
@@ -62,6 +65,10 @@ class _Job:
     pending: list = field(default_factory=list)
     budget: int = 0  # decode steps left for this text batch
     started: float = 0.0
+    # Tokens whose keys/values this job's slot currently holds, [cd, L]:
+    # the last prompt plus every token fed back while decoding it. The next
+    # text batch's prompt usually starts with exactly these tokens.
+    cached: Optional[torch.Tensor] = None
 
 
 class BatchScheduler:
@@ -172,20 +179,28 @@ class BatchScheduler:
         max_new = pj.max_new_tokens or (self.max_seq_len - T)
         max_new = min(max_new, self.max_seq_len - T)
 
+        # Prefix reuse: skip the leading tokens whose keys/values the slot
+        # already holds from this job's previous text batch. Only the new
+        # turn (usually tens of tokens) is prefilled instead of the whole
+        # conversation (thousands), which also stalls every other stream less.
+        reuse = self._reusable_prefix(job, pj)
         temp = torch.tensor(pj.temperature, device=self.device, dtype=self.dtype)
         top_p = torch.tensor(pj.top_p, device=self.device, dtype=self.dtype)
         first = decode_one_token_ar(
             self.model,
-            pj.encoded.view(1, self.cd, -1),
-            torch.arange(0, T, device=self.device, dtype=torch.long),
+            pj.encoded[:, reuse:].reshape(1, self.cd, -1),
+            torch.arange(reuse, T, device=self.device, dtype=torch.long),
             temp,
             top_p,
             pj.top_k,
             self.bias,
-            pj.audio_masks,
-            pj.audio_parts,
+            pj.audio_masks if reuse == 0 else None,
+            pj.audio_parts if reuse == 0 else None,
             slot=slot,
         )  # [cd, 1]
+        if reuse:
+            logger.info(f"[batch] slot {slot}: prefilled {T - reuse} of {T} tokens "
+                        f"(reused {reuse})")
 
         self.cur[slot] = first
         self.pos[slot, 0] = T
@@ -200,6 +215,19 @@ class BatchScheduler:
         job.budget = max_new - 1
         job.started = time.perf_counter()
 
+    def _reusable_prefix(self, job: _Job, pj: PromptJob) -> int:
+        """Number of leading prompt tokens already in this job's slot."""
+        cached, job.cached = job.cached, None
+        if cached is None or pj.audio_masks is not None:
+            return 0
+        # Keep at least one token to prefill: it produces the first logits.
+        n = min(cached.size(1), pj.encoded.size(1) - 1)
+        if n <= 0:
+            return 0
+        same = (cached[:, :n] == pj.encoded[:, :n].to(cached.dtype)).all(dim=0)
+        mismatch = (~same).nonzero()
+        return int(mismatch[0]) if mismatch.numel() else n
+
     def _finish_batch(self, slot: int):
         job = self.slots[slot]
         if job.pending:
@@ -212,6 +240,8 @@ class BatchScheduler:
         logger.info(
             f"[batch] slot {slot}: {n} tokens in {dt:.2f}s ({n / max(dt, 1e-6):.1f} tok/s)"
         )
+        # The final token was sampled but never fed back, so it has no KV.
+        job.cached = y[:, :-1] if PREFIX_REUSE else None
         job.prompt, job.tokens, job.pending = None, [], []
         self._advance(slot, y)
 
