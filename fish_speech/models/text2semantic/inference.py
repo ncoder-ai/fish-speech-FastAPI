@@ -47,6 +47,9 @@ def multinomial_sample_one_no_sync(probs_sort):
 
 
 RAS_WIN_SIZE = 10  # window for Repetition Aware Sampling
+# FISH_RAS=0 disables Repetition Aware Sampling (resampling a token that
+# repeats within the window at a higher temperature).
+RAS_ENABLED = os.environ.get("FISH_RAS", "1") != "0"
 RAS_HIGH_TEMP = 1.0
 RAS_HIGH_TOP_P = 0.9
 
@@ -134,7 +137,7 @@ def decode_one_token_ar(
     ]
 
     # Use high-temp sample if: token is semantic AND token is in previous window
-    if previous_tokens is not None:
+    if previous_tokens is not None and RAS_ENABLED:
         in_window = (previous_tokens[0] == main_token_normal).any()
         # Use tensor ops (&, torch.where) instead of Python (and, if) — torch.compile requires no data-dependent branching
         is_semantic = (main_token_normal >= model.config.semantic_begin_id) & (
@@ -243,9 +246,10 @@ def decode_one_token_batched(
     is_semantic = (main_token_normal >= model.config.semantic_begin_id) & (
         main_token_normal <= model.config.semantic_end_id
     )
-    main_token_normal = torch.where(
-        in_window & is_semantic, main_token_high, main_token_normal
-    )
+    if RAS_ENABLED:
+        main_token_normal = torch.where(
+            in_window & is_semantic, main_token_high, main_token_normal
+        )
 
     codebooks = [main_token_normal]
 

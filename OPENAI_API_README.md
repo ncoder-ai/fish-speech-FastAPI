@@ -191,6 +191,12 @@ accepted via `/v1/tts`.
 - `FISH_CONCURRENCY` (= `FISH_BATCH_SIZE`) — concurrent synths;
   `FISH_QUEUE_TIMEOUT` (300 s) — requests wait this long for a slot then get a
   fast **503** (no unbounded hang).
+- `FISH_CHUNK_PAUSE_MS` (400) — silence at each text-chunk boundary. Long input
+  is generated in chunks (`chunk_length`), and each chunk ends ~0.15 s after
+  its last word, so chunks joined edge to edge sound rushed next to the ~0.4 s
+  the model leaves between sentences within a chunk. The engine measures each
+  chunk's trailing silence and pads up to this target. `0` disables.
+- `FISH_RAS` (1) — Repetition Aware Sampling; `0` disables it (diagnostics).
 - `FISH_REF_CACHE` (on) — reuse encoded reference voices across requests. The
   voice add/delete endpoints invalidate it; set `off` if you edit files under
   `references/` by hand.
