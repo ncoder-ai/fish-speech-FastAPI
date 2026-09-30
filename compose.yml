@@ -41,6 +41,7 @@ services:
       FISH_AUTO_TRANSCRIBE: "${FISH_AUTO_TRANSCRIBE:-1}"  # ASR a transcript for voices that lack one
       FISH_ASR_MODEL: "${FISH_ASR_MODEL:-small}"  # faster-whisper model (small=multilingual)
       FISH_ASR_DEVICE: "${FISH_ASR_DEVICE:-cpu}"  # cpu | cuda:0 (cpu avoids VRAM contention)
+      FISH_CHUNK_PAUSE_MS: "${FISH_CHUNK_PAUSE_MS:-400}"  # pause at text-chunk boundaries
       FISH_BATCH_SIZE: "${FISH_BATCH_SIZE:-1}"    # >1 = continuous batching (needs FISH_QUANTIZE=none)
       FISH_CONCURRENCY: "${FISH_CONCURRENCY:-}"   # empty = FISH_BATCH_SIZE
       FISH_QUEUE_TIMEOUT: "${FISH_QUEUE_TIMEOUT:-300}"

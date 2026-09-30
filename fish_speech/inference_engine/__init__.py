@@ -22,6 +22,30 @@ from fish_speech.utils.schema import ServeTTSRequest
 
 
 _BATCH_SIZE = int(os.environ.get("FISH_BATCH_SIZE", "1") or "1")
+# Target silence between text batches (chunks), in ms. Each batch is a separate
+# generation that ends ~0.15 s after its last word and the next starts with
+# almost no lead-in, so joined edge to edge a chunk boundary sounds rushed next
+# to the ~0.4 s the model leaves between sentences within a batch. 0 disables.
+_CHUNK_PAUSE_S = int(os.environ.get("FISH_CHUNK_PAUSE_MS", "400") or "0") / 1000
+
+
+def _trailing_silence(audio: np.ndarray, sample_rate: int, thr: float = 0.012) -> float:
+    """Seconds of near-silence (20 ms RMS below `thr`) at the end of `audio`."""
+    win = max(1, int(sample_rate * 0.02))
+    tail = audio[-min(len(audio), 2 * sample_rate):]
+    n = len(tail) // win
+    if n == 0:
+        return 0.0
+    frames = tail[len(tail) - n * win :].reshape(n, win).astype(np.float32)
+    loud = np.nonzero(np.sqrt((frames**2).mean(axis=1)) >= thr)[0]
+    return (n - 1 - loud[-1]) * win / sample_rate if len(loud) else n * win / sample_rate
+
+
+def _boundary_pause(audio: np.ndarray, sample_rate: int) -> int:
+    """Samples of silence to insert after a text batch that ended with `audio`."""
+    if _CHUNK_PAUSE_S <= 0 or len(audio) == 0:
+        return 0
+    return max(0, int((_CHUNK_PAUSE_S - _trailing_silence(audio, sample_rate)) * sample_rate))
 _PROFILE = os.environ.get("FISH_BATCH_PROFILE", "0") == "1"
 
 
@@ -104,8 +128,14 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
         margin_frames = int(os.environ.get("FISH_STREAM_MARGIN_FRAMES", "8"))
         batch_codes = None
         emitted = 0  # samples already emitted for the current batch
+        # Silence (samples) owed before the next text batch's first audio.
+        pad_next = 0
 
         def _emit_segment(seg: np.ndarray):
+            nonlocal pad_next
+            if pad_next:
+                seg = np.concatenate([np.zeros(pad_next, dtype=seg.dtype), seg])
+                pad_next = 0
             segments.append(seg)
             if req.streaming:
                 return InferenceResult(
@@ -161,6 +191,7 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
                         r = _emit_segment(audio[emitted:])
                         if r is not None:
                             yield r
+                    pad_next = _boundary_pause(audio, sample_rate)
                 batch_codes = None
                 emitted = 0
 
@@ -169,13 +200,10 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
 
             else:  # "sample" — per-batch decode (non-incremental path)
                 segment = self.get_audio_segment(result)
-                if req.streaming:
-                    yield InferenceResult(
-                        code="segment",
-                        audio=(sample_rate, segment),
-                        error=None,
-                    )
-                segments.append(segment)
+                r = _emit_segment(segment)
+                pad_next = _boundary_pause(segment, sample_rate)
+                if r is not None:
+                    yield r
 
         # Clean up the memory. Skip it under continuous batching: other requests
         # are still decoding, and gc.collect() holds the GIL while empty_cache()
