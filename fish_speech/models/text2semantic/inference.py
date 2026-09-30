@@ -599,7 +599,22 @@ def _load_prequantized(checkpoint_path, device):
 def init_model(checkpoint_path, device, precision, compile=False):
     model = _load_prequantized(checkpoint_path, device)
     if model is None:
-        model = DualARTransformer.from_pretrained(checkpoint_path, load_weights=True)
+        if torch.device(device).type == "cuda":
+            # Build the model on the GPU in the target dtype and stream the
+            # safetensors shards straight to VRAM. The CPU path builds an fp32
+            # skeleton (~18 GB) plus a CPU copy of the weights, which swaps
+            # hard on low-RAM hosts.
+            prev_dtype = torch.get_default_dtype()
+            torch.set_default_dtype(precision)
+            try:
+                with torch.device(device):
+                    model = DualARTransformer.from_pretrained(
+                        checkpoint_path, load_weights=True, weights_device=str(device)
+                    )
+            finally:
+                torch.set_default_dtype(prev_dtype)
+        else:
+            model = DualARTransformer.from_pretrained(checkpoint_path, load_weights=True)
         model = model.to(device=device, dtype=precision)
         logger.info(f"Restored model from checkpoint")
 

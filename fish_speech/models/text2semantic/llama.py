@@ -508,6 +508,7 @@ class BaseTransformer(nn.Module):
         max_length: int | None = None,
         lora_config: LoraConfig | None = None,
         rope_base: int | None = None,
+        weights_device: str = "cpu",
     ) -> "BaseTransformer":
         # Import wrapper locally to avoid circular dependency or global import issues
         from fish_speech.tokenizer import FishTokenizer
@@ -582,13 +583,15 @@ class BaseTransformer(nn.Module):
                 shard_files = sorted(set(st_index["weight_map"].values()))
                 weights = OrderedDict()
                 for shard in shard_files:
-                    weights.update(st_load_file(str(path_obj / shard), device="cpu"))
+                    weights.update(
+                        st_load_file(str(path_obj / shard), device=weights_device)
+                    )
                 weights = _remap_fish_qwen3_omni_keys(weights)
             elif single_st.exists():
                 logger.info("Loading single safetensors weights")
                 from safetensors.torch import load_file as st_load_file
 
-                weights = OrderedDict(st_load_file(str(single_st), device="cpu"))
+                weights = OrderedDict(st_load_file(str(single_st), device=weights_device))
                 weights = _remap_fish_qwen3_omni_keys(weights)
             elif pth_file.exists():
                 weights = torch.load(
