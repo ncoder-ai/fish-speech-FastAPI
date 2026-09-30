@@ -202,12 +202,28 @@ class KVCache(nn.Module):
         self.register_buffer("k_cache", torch.zeros(cache_shape, dtype=dtype))
         self.register_buffer("v_cache", torch.zeros(cache_shape, dtype=dtype))
 
-    def update(self, input_pos, k_val, v_val):
+    def update(self, input_pos, k_val, v_val, slot: Optional[int] = None):
+        k_out = self.k_cache
+        v_out = self.v_cache
+
+        if input_pos.dim() == 2:
+            # Batched decode: one position per row. input_pos: [B, 1],
+            # k_val: [B, H, 1, D]. Each row writes only its own position.
+            rows = torch.arange(k_val.size(0), device=k_val.device)
+            k_out[rows, :, input_pos[:, 0]] = k_val[:, :, 0]
+            v_out[rows, :, input_pos[:, 0]] = v_val[:, :, 0]
+            return k_out, v_out
+
         # input_pos: [S], k_val: [B, H, S, D]
         assert input_pos.shape[0] == k_val.shape[2]
 
-        k_out = self.k_cache
-        v_out = self.v_cache
+        if slot is not None:
+            # Prefill one request (batch 1) into a single cache row, leaving the
+            # rows that belong to other in-flight requests untouched.
+            k_out[slot][:, input_pos] = k_val[0]
+            v_out[slot][:, input_pos] = v_val[0]
+            return k_out[slot : slot + 1], v_out[slot : slot + 1]
+
         k_out[:, :, input_pos] = k_val
         v_out[:, :, input_pos] = v_val
 
@@ -304,6 +320,29 @@ class BaseTransformer(nn.Module):
         if init_weights:
             self.apply(self._init_weights)
 
+    def setup_semantic_head(self, im_end_id: int) -> None:
+        """Precompute the output-head rows for the tokens decoding may emit.
+
+        Decoding masks every token except the semantic (audio) range and
+        im_end, so scoring the full vocabulary (~155k rows, 0.8 GB read per
+        step) is wasted. `semantic_head` holds just those rows (~4k, ~21 MB);
+        `semantic_ids[i]` is the vocabulary id of logit column i."""
+        weight = (
+            self.embeddings.weight
+            if self.config.tie_word_embeddings
+            else self.output.weight
+        )
+        begin, end = self.config.semantic_begin_id, self.config.semantic_end_id
+        self.semantic_head = torch.cat(
+            [weight[begin : end + 1], weight[im_end_id : im_end_id + 1]]
+        ).contiguous()
+        self.semantic_ids = torch.cat(
+            [
+                torch.arange(begin, end + 1, device=weight.device, dtype=torch.int),
+                torch.tensor([im_end_id], device=weight.device, dtype=torch.int),
+            ]
+        )
+
     def setup_caches(
         self, max_batch_size: int, max_seq_len: int, dtype: torch.dtype = torch.bfloat16
     ):
@@ -394,6 +433,9 @@ class BaseTransformer(nn.Module):
         audio_masks: Optional[Tensor] = None,
         audio_parts: Optional[Tensor] = None,
         return_all: bool = False,
+        slot: Optional[int] = None,
+        kv_len: Optional[int] = None,
+        semantic_only: bool = False,
     ) -> BaseTransformerForwardResult:
 
         # Embedding logic replicated from embed() for compilation compatibility
@@ -438,18 +480,28 @@ class BaseTransformer(nn.Module):
         else:
             max_seq_len = self.max_seq_len
 
-        mask = self.causal_mask[None, None, input_pos, :max_seq_len]  # (B, N, Q, K)
+        if input_pos.dim() == 2:
+            # Batched decode: per-row positions, input_pos [B, 1]. Attend only
+            # to the first `kv_len` cache slots (covers every row's position).
+            if kv_len is not None:
+                max_seq_len = kv_len
+            mask = self.causal_mask[input_pos[:, 0], :max_seq_len][:, None, None, :]
+        else:
+            mask = self.causal_mask[None, None, input_pos, :max_seq_len]  # (B, N, Q, K)
         freqs_cis = self.freqs_cis[input_pos]
 
         for layer in self.layers:
-            x = layer(x, freqs_cis, mask, input_pos=input_pos)
+            x = layer(x, freqs_cis, mask, input_pos=input_pos, slot=slot, kv_len=kv_len)
 
         if x.size(1) > 1 and not return_all:
             x = x[:, -1:]
 
         slow_out = self.norm(x)
 
-        if self.config.is_reward_model:
+        if semantic_only:
+            # Only the tokens decoding may emit (see setup_semantic_head).
+            token_logits = F.linear(slow_out, self.semantic_head)
+        elif self.config.is_reward_model:
             token_logits = self.score_output(slow_out)
         elif self.config.tie_word_embeddings:
             token_logits = F.linear(slow_out, self.embeddings.weight)
@@ -483,6 +535,7 @@ class BaseTransformer(nn.Module):
         max_length: int | None = None,
         lora_config: LoraConfig | None = None,
         rope_base: int | None = None,
+        weights_device: str = "cpu",
     ) -> "BaseTransformer":
         # Import wrapper locally to avoid circular dependency or global import issues
         from fish_speech.tokenizer import FishTokenizer
@@ -557,13 +610,15 @@ class BaseTransformer(nn.Module):
                 shard_files = sorted(set(st_index["weight_map"].values()))
                 weights = OrderedDict()
                 for shard in shard_files:
-                    weights.update(st_load_file(str(path_obj / shard), device="cpu"))
+                    weights.update(
+                        st_load_file(str(path_obj / shard), device=weights_device)
+                    )
                 weights = _remap_fish_qwen3_omni_keys(weights)
             elif single_st.exists():
                 logger.info("Loading single safetensors weights")
                 from safetensors.torch import load_file as st_load_file
 
-                weights = OrderedDict(st_load_file(str(single_st), device="cpu"))
+                weights = OrderedDict(st_load_file(str(single_st), device=weights_device))
                 weights = _remap_fish_qwen3_omni_keys(weights)
             elif pth_file.exists():
                 weights = torch.load(
@@ -797,7 +852,7 @@ class DualARTransformer(BaseTransformer):
         )
 
     def forward_generate_fast(
-        self, x: Tensor, input_pos: Optional[Tensor] = None
+        self, x: Tensor, input_pos: Optional[Tensor] = None, slot: Optional[int] = None
     ) -> Tensor:
         # Fast transformer
         x = x.view(x.shape[0], 1, -1)
@@ -808,7 +863,7 @@ class DualARTransformer(BaseTransformer):
         fast_freqs_cis = self.fast_freqs_cis[input_pos]
 
         for layer in self.fast_layers:
-            x = layer(x, fast_freqs_cis, fast_mask, input_pos=input_pos)
+            x = layer(x, fast_freqs_cis, fast_mask, input_pos=input_pos, slot=slot)
 
         # unflatten the batch and num_codebooks
         fast_out = self.fast_norm(x)  # only take the last token
@@ -822,8 +877,19 @@ class DualARTransformer(BaseTransformer):
         input_pos: Optional[Tensor] = None,
         audio_masks: Optional[Tensor] = None,
         audio_parts: Optional[Tensor] = None,
+        slot: Optional[int] = None,
+        kv_len: Optional[int] = None,
+        semantic_only: bool = False,
     ) -> TransformerForwardResult:
-        x = super().forward_generate(x, input_pos, audio_masks, audio_parts)
+        x = super().forward_generate(
+            x,
+            input_pos,
+            audio_masks,
+            audio_parts,
+            slot=slot,
+            kv_len=kv_len,
+            semantic_only=semantic_only,
+        )
         x.hidden_states = self.fast_project_in(x.hidden_states)
         return x
 
@@ -837,9 +903,17 @@ class TransformerBlock(nn.Module):
         self.attention_norm = RMSNorm(config.dim, config.norm_eps)
 
     def forward(
-        self, x: Tensor, freqs_cis: Tensor, mask: Tensor, input_pos: Tensor = None
+        self,
+        x: Tensor,
+        freqs_cis: Tensor,
+        mask: Tensor,
+        input_pos: Tensor = None,
+        slot: Optional[int] = None,
+        kv_len: Optional[int] = None,
     ) -> Tensor:
-        h = x + self.attention(self.attention_norm(x), freqs_cis, mask, input_pos)
+        h = x + self.attention(
+            self.attention_norm(x), freqs_cis, mask, input_pos, slot=slot, kv_len=kv_len
+        )
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
@@ -887,6 +961,8 @@ class Attention(nn.Module):
         freqs_cis: Tensor,
         mask: Tensor,
         input_pos: Optional[Tensor] = None,
+        slot: Optional[int] = None,
+        kv_len: Optional[int] = None,
     ) -> Tensor:
         bsz, seqlen, _ = x.shape
 
@@ -908,7 +984,9 @@ class Attention(nn.Module):
         q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
 
         if self.kv_cache is not None:
-            k, v = self.kv_cache.update(input_pos, k, v)
+            k, v = self.kv_cache.update(input_pos, k, v, slot=slot)
+            if kv_len is not None:
+                k, v = k[:, :, :kv_len], v[:, :, :kv_len]
 
         k = k.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
         v = v.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
@@ -1025,7 +1103,7 @@ def precompute_freqs_cis(seq_len: int, n_elem: int, base: int = 10000) -> Tensor
 
 def apply_rotary_emb(x: Tensor, freqs_cis: Tensor) -> Tensor:
     xshaped = x.float().reshape(*x.shape[:-1], -1, 2)
-    freqs_cis = freqs_cis.view(1, xshaped.size(1), 1, xshaped.size(3), 2)
+    freqs_cis = freqs_cis.view(-1, xshaped.size(1), 1, xshaped.size(3), 2)
     x_out2 = torch.stack(
         [
             xshaped[..., 0] * freqs_cis[..., 0] - xshaped[..., 1] * freqs_cis[..., 1],

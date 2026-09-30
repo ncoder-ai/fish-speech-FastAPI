@@ -1,3 +1,5 @@
+import os
+
 import torch
 from loguru import logger
 
@@ -63,6 +65,8 @@ class ModelManager:
                 device=device,
                 precision=precision,
                 compile=compile,
+                # >1 = continuous batching: that many requests decode together.
+                batch_size=int(os.environ.get("FISH_BATCH_SIZE", "1")),
             )
         else:
             raise ValueError(f"Invalid mode: {mode}")
