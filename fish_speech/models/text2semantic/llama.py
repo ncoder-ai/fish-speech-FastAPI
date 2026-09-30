@@ -320,6 +320,29 @@ class BaseTransformer(nn.Module):
         if init_weights:
             self.apply(self._init_weights)
 
+    def setup_semantic_head(self, im_end_id: int) -> None:
+        """Precompute the output-head rows for the tokens decoding may emit.
+
+        Decoding masks every token except the semantic (audio) range and
+        im_end, so scoring the full vocabulary (~155k rows, 0.8 GB read per
+        step) is wasted. `semantic_head` holds just those rows (~4k, ~21 MB);
+        `semantic_ids[i]` is the vocabulary id of logit column i."""
+        weight = (
+            self.embeddings.weight
+            if self.config.tie_word_embeddings
+            else self.output.weight
+        )
+        begin, end = self.config.semantic_begin_id, self.config.semantic_end_id
+        self.semantic_head = torch.cat(
+            [weight[begin : end + 1], weight[im_end_id : im_end_id + 1]]
+        ).contiguous()
+        self.semantic_ids = torch.cat(
+            [
+                torch.arange(begin, end + 1, device=weight.device, dtype=torch.int),
+                torch.tensor([im_end_id], device=weight.device, dtype=torch.int),
+            ]
+        )
+
     def setup_caches(
         self, max_batch_size: int, max_seq_len: int, dtype: torch.dtype = torch.bfloat16
     ):
@@ -412,6 +435,7 @@ class BaseTransformer(nn.Module):
         return_all: bool = False,
         slot: Optional[int] = None,
         kv_len: Optional[int] = None,
+        semantic_only: bool = False,
     ) -> BaseTransformerForwardResult:
 
         # Embedding logic replicated from embed() for compilation compatibility
@@ -474,7 +498,10 @@ class BaseTransformer(nn.Module):
 
         slow_out = self.norm(x)
 
-        if self.config.is_reward_model:
+        if semantic_only:
+            # Only the tokens decoding may emit (see setup_semantic_head).
+            token_logits = F.linear(slow_out, self.semantic_head)
+        elif self.config.is_reward_model:
             token_logits = self.score_output(slow_out)
         elif self.config.tie_word_embeddings:
             token_logits = F.linear(slow_out, self.embeddings.weight)
@@ -852,9 +879,16 @@ class DualARTransformer(BaseTransformer):
         audio_parts: Optional[Tensor] = None,
         slot: Optional[int] = None,
         kv_len: Optional[int] = None,
+        semantic_only: bool = False,
     ) -> TransformerForwardResult:
         x = super().forward_generate(
-            x, input_pos, audio_masks, audio_parts, slot=slot, kv_len=kv_len
+            x,
+            input_pos,
+            audio_masks,
+            audio_parts,
+            slot=slot,
+            kv_len=kv_len,
+            semantic_only=semantic_only,
         )
         x.hidden_states = self.fast_project_in(x.hidden_states)
         return x

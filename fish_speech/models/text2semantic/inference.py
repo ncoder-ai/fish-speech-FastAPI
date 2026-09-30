@@ -112,26 +112,26 @@ def decode_one_token_ar(
         audio_masks=audio_masks,
         audio_parts=audio_parts,
         slot=slot,
+        semantic_only=True,
     )
-    logits = forward_result.logits  # (1, 1, vocab_size)
+    # Constrained decoding: only semantic tokens + im_end are scored (the rows
+    # that semantic_logit_bias leaves unmasked); column i is semantic_ids[i].
+    biased_logits = forward_result.logits  # (1, 1, n_semantic + 1)
     hidden_states = forward_result.hidden_states
 
-    # Apply constrained decoding: only allow semantic tokens + im_end
-    biased_logits = logits + semantic_logit_bias
-
     # Normal sample
-    main_token_normal = sample(
-        biased_logits, temperature=temperature, top_p=top_p, top_k=top_k
-    )[0]
+    main_token_normal = model.semantic_ids[
+        sample(biased_logits, temperature=temperature, top_p=top_p, top_k=top_k)[0]
+    ]
 
     # RAS: also sample with high temp to use as fallback if token repeats
     high_temp = torch.tensor(
         RAS_HIGH_TEMP, device=temperature.device, dtype=temperature.dtype
     )
     high_top_p = torch.tensor(RAS_HIGH_TOP_P, device=top_p.device, dtype=top_p.dtype)
-    main_token_high = sample(
-        biased_logits, temperature=high_temp, top_p=high_top_p, top_k=top_k
-    )[0]
+    main_token_high = model.semantic_ids[
+        sample(biased_logits, temperature=high_temp, top_p=high_top_p, top_k=top_k)[0]
+    ]
 
     # Use high-temp sample if: token is semantic AND token is in previous window
     if previous_tokens is not None:
@@ -225,17 +225,20 @@ def decode_one_token_batched(
     compiled graph serve every context length instead of always scanning
     max_seq_len. Returns the next frame for every row: [B, num_codebooks + 1]."""
     kv_len = kv_len_hint.shape[0] if kv_len_hint is not None else None
-    forward_result = model.forward_generate(x, input_pos, kv_len=kv_len)
-    logits = forward_result.logits[:, -1]  # [B, V]
+    forward_result = model.forward_generate(
+        x, input_pos, kv_len=kv_len, semantic_only=True
+    )
+    # Only semantic tokens + im_end are scored; column i is semantic_ids[i].
+    biased_logits = forward_result.logits[:, -1]  # [B, n_semantic + 1]
     hidden_states = forward_result.hidden_states  # [B, 1, D]
 
-    biased_logits = logits + semantic_logit_bias.view(1, -1)
-    main_token_normal = sample_batched(biased_logits, temperature, top_p, top_k)
+    ids = model.semantic_ids
+    main_token_normal = ids[sample_batched(biased_logits, temperature, top_p, top_k)]
 
     # RAS: resample at high temperature when the token repeats within the window.
     high_temp = torch.full_like(temperature, RAS_HIGH_TEMP)
     high_top_p = torch.full_like(top_p, RAS_HIGH_TOP_P)
-    main_token_high = sample_batched(biased_logits, high_temp, high_top_p, top_k)
+    main_token_high = ids[sample_batched(biased_logits, high_temp, high_top_p, top_k)]
     in_window = (previous_tokens[:, 0] == main_token_normal).any(dim=-1, keepdim=True)
     is_semantic = (main_token_normal >= model.config.semantic_begin_id) & (
         main_token_normal <= model.config.semantic_end_id
@@ -638,6 +641,8 @@ def init_model(checkpoint_path, device, precision, compile=False):
 
     # Mark whether cache has been initialized
     model._cache_setup_done = False
+
+    model.setup_semantic_head(model.tokenizer.get_token_id(IM_END_TOKEN))
 
     if compile:
         logger.info("Compiling function...")

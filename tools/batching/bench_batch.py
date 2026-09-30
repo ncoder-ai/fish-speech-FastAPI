@@ -11,6 +11,9 @@ steps = int(os.environ.get("STEPS", "200"))
 model, _ = I.init_model("checkpoints/s2-pro", dev, torch.bfloat16, compile=False)
 cd = model.config.num_codebooks + 1
 torch._dynamo.config.cache_size_limit = 64
+# Scheduler state is made of inference tensors; mutate it in inference mode.
+_INFERENCE_MODE = torch.inference_mode()  # keep a reference: the guard ends on GC
+_INFERENCE_MODE.__enter__()
 for B in [int(b) for b in os.environ.get("BATCHES", "1,2,4").split(",")]:
     for l in model.layers: l.attention.kv_cache = None
     model.max_batch_size = -1; model.max_seq_len = -1
