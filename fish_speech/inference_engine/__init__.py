@@ -1,5 +1,7 @@
 import gc
+import os
 import queue
+import time
 from typing import Generator
 
 import numpy as np
@@ -17,6 +19,10 @@ from fish_speech.models.text2semantic.inference import (
 )
 from fish_speech.utils import autocast_exclude_mps, set_seed
 from fish_speech.utils.schema import ServeTTSRequest
+
+
+_BATCH_SIZE = int(os.environ.get("FISH_BATCH_SIZE", "1") or "1")
+_PROFILE = os.environ.get("FISH_BATCH_PROFILE", "0") == "1"
 
 
 class TTSInferenceEngine(ReferenceLoader, VQManager):
@@ -171,8 +177,10 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
                     )
                 segments.append(segment)
 
-        # Clean up the memory
-        if torch.cuda.is_available():
+        # Clean up the memory. Skip it under continuous batching: other requests
+        # are still decoding, and gc.collect() holds the GIL while empty_cache()
+        # forces fresh (synchronizing) cudaMallocs, stalling every stream.
+        if torch.cuda.is_available() and _BATCH_SIZE <= 1:
             torch.cuda.empty_cache()
             gc.collect()
 
@@ -237,11 +245,18 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
 
     def _decode_codes(self, codes) -> np.ndarray:
         """Decode a VQ-code tensor to a float32 numpy waveform."""
+        t0 = time.perf_counter()
         with autocast_exclude_mps(
             device_type=self.decoder_model.device.type, dtype=self.precision
         ):
             segment = self.decode_vq_tokens(codes=codes)
-        return segment.float().cpu().numpy()
+        out = segment.float().cpu().numpy()
+        if _PROFILE:
+            logger.info(
+                f"[codec] decoded {codes.shape[-1]} frames in "
+                f"{(time.perf_counter() - t0) * 1000:.0f} ms"
+            )
+        return out
 
     def get_audio_segment(self, result: GenerateResponse) -> np.ndarray:
         """

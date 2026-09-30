@@ -104,12 +104,14 @@ def decode_one_token_ar(
     audio_masks: torch.Tensor,
     audio_parts: torch.Tensor,
     previous_tokens: Optional[torch.Tensor] = None,
+    slot: Optional[int] = None,
 ) -> torch.Tensor:
     forward_result = model.forward_generate(
         x,
         input_pos,
         audio_masks=audio_masks,
         audio_parts=audio_parts,
+        slot=slot,
     )
     logits = forward_result.logits  # (1, 1, vocab_size)
     hidden_states = forward_result.hidden_states
@@ -146,7 +148,7 @@ def decode_one_token_ar(
     codebooks = [main_token_normal]
 
     input_pos = torch.tensor([0], device=hidden_states.device, dtype=torch.long)
-    model.forward_generate_fast(hidden_states, input_pos)
+    model.forward_generate_fast(hidden_states, input_pos, slot=slot)
 
     a = codebooks[0] - model.config.semantic_begin_id
     a = torch.clamp(a, min=0, max=model.config.codebook_size - 1)
@@ -158,7 +160,7 @@ def decode_one_token_ar(
         input_pos = torch.tensor(
             [codebook_idx], device=hidden_states.device, dtype=torch.long
         )
-        logits = model.forward_generate_fast(hidden_states, input_pos)
+        logits = model.forward_generate_fast(hidden_states, input_pos, slot=slot)
 
         short_logits = logits  # DualAR predicts config.codebook_size number of tokens
 
@@ -179,6 +181,89 @@ def decode_one_token_ar(
     del logits, hidden_states, forward_result
 
     return codebooks.T
+
+
+def sample_batched(
+    logits: torch.Tensor,
+    temperature: torch.Tensor,
+    top_p: torch.Tensor,
+    top_k: int,
+) -> torch.Tensor:
+    """Row-wise version of `sample`. logits: [B, V]; temperature, top_p: [B, 1].
+
+    Same math as logits_to_probs + multinomial_sample_one_no_sync, applied to
+    every row independently. Returns token ids [B, 1]."""
+    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+    cum_probs = torch.cumsum(torch.nn.functional.softmax(sorted_logits, dim=-1), dim=-1)
+    indices = torch.arange(sorted_logits.shape[-1], device=logits.device)
+    # Always keep the top token of each row.
+    remove = ((cum_probs > top_p) | (indices >= top_k)) & (indices != 0)
+    indices_to_remove = remove.scatter(dim=-1, index=sorted_indices, src=remove)
+    logits = torch.where(indices_to_remove, float("-Inf"), logits)
+    logits = logits / torch.clip(temperature, min=1e-5)
+    probs = torch.nn.functional.softmax(logits, dim=-1)
+    return multinomial_sample_one_no_sync(probs)
+
+
+def decode_one_token_batched(
+    model: DualARTransformer,
+    x: torch.Tensor,
+    input_pos: torch.Tensor,
+    temperature: torch.Tensor,
+    top_p: torch.Tensor,
+    top_k: int,
+    semantic_logit_bias: torch.Tensor,
+    previous_tokens: torch.Tensor,
+    kv_len_hint: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """One decode step for B independent sequences (one per KV-cache row).
+
+    x: [B, num_codebooks + 1, 1]; input_pos: [B, 1] (per-row position);
+    temperature, top_p: [B, 1]; previous_tokens: [B, num_codebooks + 1, RAS_WIN].
+    kv_len_hint: optional tensor whose LENGTH is how many cache slots to attend
+    to (>= every row's position + 1). Passing it as a dynamic dimension lets one
+    compiled graph serve every context length instead of always scanning
+    max_seq_len. Returns the next frame for every row: [B, num_codebooks + 1]."""
+    kv_len = kv_len_hint.shape[0] if kv_len_hint is not None else None
+    forward_result = model.forward_generate(x, input_pos, kv_len=kv_len)
+    logits = forward_result.logits[:, -1]  # [B, V]
+    hidden_states = forward_result.hidden_states  # [B, 1, D]
+
+    biased_logits = logits + semantic_logit_bias.view(1, -1)
+    main_token_normal = sample_batched(biased_logits, temperature, top_p, top_k)
+
+    # RAS: resample at high temperature when the token repeats within the window.
+    high_temp = torch.full_like(temperature, RAS_HIGH_TEMP)
+    high_top_p = torch.full_like(top_p, RAS_HIGH_TOP_P)
+    main_token_high = sample_batched(biased_logits, high_temp, high_top_p, top_k)
+    in_window = (previous_tokens[:, 0] == main_token_normal).any(dim=-1, keepdim=True)
+    is_semantic = (main_token_normal >= model.config.semantic_begin_id) & (
+        main_token_normal <= model.config.semantic_end_id
+    )
+    main_token_normal = torch.where(
+        in_window & is_semantic, main_token_high, main_token_normal
+    )
+
+    codebooks = [main_token_normal]
+
+    input_pos_fast = torch.tensor([0], device=hidden_states.device, dtype=torch.long)
+    model.forward_generate_fast(hidden_states, input_pos_fast)
+
+    a = main_token_normal - model.config.semantic_begin_id
+    a = torch.clamp(a, min=0, max=model.config.codebook_size - 1)
+    hidden_states = model.fast_embeddings(a)  # [B, 1, D]
+    codebooks.append(a)
+
+    for codebook_idx in range(1, model.config.num_codebooks):
+        input_pos_fast = torch.tensor(
+            [codebook_idx], device=hidden_states.device, dtype=torch.long
+        )
+        logits = model.forward_generate_fast(hidden_states, input_pos_fast)
+        a = sample_batched(logits[:, -1], temperature, top_p, top_k)
+        hidden_states = model.fast_embeddings(a)
+        codebooks.append(a)
+
+    return torch.cat(codebooks, dim=1)
 
 
 def decode_n_tokens(
@@ -474,6 +559,12 @@ def _load_prequantized(checkpoint_path, device):
     qpath = os.environ.get("FISH_QUANTIZED_WEIGHTS", "").strip()
     if not qpath:
         return None
+    mode = os.environ.get("FISH_QUANTIZE", "").strip().lower()
+    if mode not in ("int8", "int4"):
+        # A leftover weights path must not silently override FISH_QUANTIZE=none.
+        logger.info(f"[quant] FISH_QUANTIZE={mode or 'none'}; ignoring "
+                    f"FISH_QUANTIZED_WEIGHTS={qpath}")
+        return None
     if not Path(qpath).exists():
         logger.warning(f"[quant] FISH_QUANTIZED_WEIGHTS={qpath} not found; "
                        "falling back to live quantization.")
@@ -673,11 +764,65 @@ def group_turns_into_batches(
     return batches
 
 
+@dataclass
+class PromptJob:
+    """One generation the caller of `generate_long_steps` must run.
+
+    The caller sends back `y` in the same layout `generate()` returns:
+    [num_codebooks + 1, prompt_len + generated_len]."""
+
+    encoded: torch.Tensor
+    audio_masks: Optional[torch.Tensor]
+    audio_parts: Optional[torch.Tensor]
+    max_new_tokens: int
+    temperature: float
+    top_p: float
+    top_k: int
+
+
 def generate_long(
     *,
     model,
-    device: Union[str, torch.device],
     decode_one_token: Callable,
+    stream_emit=None,
+    stream_chunk_tokens: int = 0,
+    **kwargs,
+):
+    """Single-request generation: drives `generate_long_steps` with `generate()`."""
+    steps = generate_long_steps(
+        model=model,
+        incremental=bool(stream_emit) and stream_chunk_tokens > 0,
+        **kwargs,
+    )
+    y = None
+    while True:
+        try:
+            item = steps.send(y)
+        except StopIteration:
+            return
+        y = None
+        if isinstance(item, PromptJob):
+            y = generate(
+                model=model,
+                prompt=item.encoded,
+                max_new_tokens=item.max_new_tokens,
+                audio_masks=item.audio_masks,
+                audio_parts=item.audio_parts,
+                decode_one_token=decode_one_token,
+                temperature=item.temperature,
+                top_p=item.top_p,
+                top_k=item.top_k,
+                stream_emit=stream_emit,
+                stream_chunk_tokens=stream_chunk_tokens,
+            )
+        else:
+            yield item
+
+
+def generate_long_steps(
+    *,
+    model,
+    device: Union[str, torch.device],
     text: str,
     num_samples: int = 1,
     max_new_tokens: int = 0,
@@ -691,9 +836,13 @@ def generate_long(
     prompt_text: Optional[Union[str, list[str]]] = None,
     prompt_tokens: Optional[Union[torch.Tensor, list[torch.Tensor]]] = None,
     cancel_event=None,
-    stream_emit=None,
-    stream_chunk_tokens: int = 0,
+    incremental: bool = False,
 ):
+    """Generator form of long-form generation.
+
+    Yields a `PromptJob` whenever it needs tokens generated (the caller sends
+    back the resulting sequence) and `GenerateResponse`s for the consumer. This
+    lets one worker interleave many requests (see batch_scheduler.py)."""
     # Optional threading.Event: when set (e.g. the HTTP client disconnected) the
     # batch loop stops after the current batch so the worker is freed promptly
     # instead of grinding through the rest of a long multi-batch request.
@@ -870,18 +1019,14 @@ def generate_long(
             encoded = encoded.to(device=device)
             prompt_length = encoded.size(1)
 
-            y = generate(
-                model=model,
-                prompt=encoded,
-                max_new_tokens=max_new_tokens,
+            y = yield PromptJob(
+                encoded=encoded,
                 audio_masks=audio_masks,
                 audio_parts=audio_parts,
-                decode_one_token=decode_one_token,
+                max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_p=top_p,
                 top_k=top_k,
-                stream_emit=stream_emit,
-                stream_chunk_tokens=stream_chunk_tokens,
             )
 
             if sample_idx == 0 and batch_idx == 0 and compile:
@@ -926,7 +1071,7 @@ def generate_long(
                 )
             )
 
-            if stream_emit and stream_chunk_tokens > 0:
+            if incremental:
                 # Audio for this batch was already flushed incrementally via
                 # stream_emit during generate(); just mark the batch boundary so
                 # the consumer flushes its held margin and resets per-batch state.
@@ -968,9 +1113,24 @@ def launch_thread_safe_queue(
     device,
     precision,
     compile: bool = False,
+    batch_size: int = 1,
 ):
     input_queue = queue.Queue()
     init_event = threading.Event()
+
+    if batch_size > 1:
+
+        def batched_worker():
+            from fish_speech.models.text2semantic.batch_scheduler import BatchScheduler
+
+            model, _ = init_model(checkpoint_path, device, precision, compile=False)
+            scheduler = BatchScheduler(model, batch_size=batch_size, compile=compile)
+            init_event.set()
+            scheduler.run(input_queue)
+
+        threading.Thread(target=batched_worker, daemon=True).start()
+        init_event.wait()
+        return input_queue
 
     def worker():
         model, decode_one_token = init_model(

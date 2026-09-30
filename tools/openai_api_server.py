@@ -60,11 +60,12 @@ from tools.server.model_manager import ModelManager
 ARGS: argparse.Namespace = None  # type: ignore
 MODEL_MANAGER: Optional[ModelManager] = None
 
-# Serializes GPU work across requests. The LLAMA worker is a single thread, so
-# letting many requests fan out only thrashes VRAM and the executor pool and
-# makes everything appear to hang. We gate synthesis behind this semaphore
-# (default size 1) and fail fast with 503 once a request has waited too long,
-# turning an unbounded hang into a clear, retryable error.
+# Caps simultaneous synthesis requests. The LLAMA worker decodes up to
+# FISH_BATCH_SIZE requests together (continuous batching); admitting more than
+# that only queues them inside the worker and thrashes the executor pool. We
+# gate synthesis behind this semaphore (defaults to FISH_BATCH_SIZE) and fail
+# fast with 503 once a request has waited too long, turning an unbounded hang
+# into a clear, retryable error.
 SYNTH_SEM: Optional[asyncio.Semaphore] = None
 
 # OpenAI default voice names -> treated as "model default speaker" unless a
@@ -79,6 +80,11 @@ _PCM_RATE_FALLBACK = 44100
 # 0 = off (decode per batch). 32 ≈ first audio in ~1.5s on long turns instead of
 # ~12s. A request can override via SpeechRequest.stream_chunk_tokens.
 _STREAM_CHUNK_DEFAULT = int(os.environ.get("FISH_STREAM_CHUNK_TOKENS", "0") or "0")
+# Reuse encoded reference voices across requests (invalidated by the voice
+# add/delete endpoints). Otherwise every request re-encodes the reference clip
+# through the codec, which also blocks other in-flight streams' audio decode.
+# Set FISH_REF_CACHE=off if you edit files under references/ by hand.
+_REF_CACHE = "off" if os.environ.get("FISH_REF_CACHE", "on").lower() == "off" else "on"
 
 # Fish-Speech S2-Pro emotion / prosody / tone tags (inline in `input`).
 # S2-Pro accepts 15k+ free-form tags; these are the documented built-ins.
@@ -313,6 +319,7 @@ def _build_tts_request(r: SpeechRequest, text: str, streaming: bool,
         format="wav",
         references=references,
         reference_id=reference_id,
+        use_memory_cache=_REF_CACHE,
         seed=seed if seed is not None else r.seed,
         normalize=r.normalize,
         streaming=streaming,
@@ -968,9 +975,11 @@ def parse_args():
     p.add_argument(
         "--concurrency",
         type=int,
-        default=int(os.environ.get("FISH_CONCURRENCY", "1")),
-        help="Max simultaneous synthesis requests (GPU worker is single-threaded; "
-             "keep at 1 unless you know you have headroom).",
+        default=int(
+            os.environ.get("FISH_CONCURRENCY") or os.environ.get("FISH_BATCH_SIZE") or "1"
+        ),
+        help="Max simultaneous synthesis requests; extra requests queue. Defaults "
+             "to FISH_BATCH_SIZE (the number of requests decoded together).",
     )
     p.add_argument(
         "--queue-timeout",

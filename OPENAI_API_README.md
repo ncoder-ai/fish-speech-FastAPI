@@ -173,8 +173,27 @@ accepted via `/v1/tts`.
   long-range continuity is lost). Keep 8192 (default) for full-scene context.
 - `FISH_TORCH_CACHE_HOST_DIR` (`./.torch-cache`) — persists the torch.compile /
   Triton kernel cache so a warm restart skips the ~4-min recompile (~44 s warm).
-- `FISH_CONCURRENCY` (1) — concurrent synths; `FISH_QUEUE_TIMEOUT` (300 s) —
-  requests wait this long for a slot then get a fast **503** (no unbounded hang).
+- `FISH_BATCH_SIZE` (1) — requests decoded together (continuous batching). Each
+  request owns one KV-cache slot; one decode step serves every slot, and new
+  requests join between steps. Decode is memory-bandwidth-bound, so a step for
+  4 requests costs about the same as a step for 1. On an RTX 3090 (bf16):
+
+  | Concurrent streams | Aggregate speed | Per-stream RTF | First audio |
+  |---|---|---|---|
+  | 1 (`FISH_BATCH_SIZE=1`, int8) | 1.5× real time | 0.66 | 1.2 s (later requests queue: 15 s at 4) |
+  | 4 (`FISH_BATCH_SIZE=4`) | 4.5× real time | ~0.8 | ~1.6 s |
+  | 6 (`FISH_BATCH_SIZE=6`) | 5.8× real time | ~0.95 | ~2.1 s |
+
+  Use `FISH_QUANTIZE=none` with batching: torchao int8/int4 kernels are fused
+  only at batch size 1 and dequantize every weight each step at larger sizes.
+  VRAM grows ~1.2 GB per slot at `FISH_MAX_SEQ_LEN=8192`. `seed` is not
+  reproducible while other requests share the batch.
+- `FISH_CONCURRENCY` (= `FISH_BATCH_SIZE`) — concurrent synths;
+  `FISH_QUEUE_TIMEOUT` (300 s) — requests wait this long for a slot then get a
+  fast **503** (no unbounded hang).
+- `FISH_REF_CACHE` (on) — reuse encoded reference voices across requests. The
+  voice add/delete endpoints invalidate it; set `off` if you edit files under
+  `references/` by hand.
 
 ## Pre-quantized weights (quantize once; persist; move between boxes)
 

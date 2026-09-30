@@ -41,7 +41,8 @@ services:
       FISH_AUTO_TRANSCRIBE: "${FISH_AUTO_TRANSCRIBE:-1}"  # ASR a transcript for voices that lack one
       FISH_ASR_MODEL: "${FISH_ASR_MODEL:-small}"  # faster-whisper model (small=multilingual)
       FISH_ASR_DEVICE: "${FISH_ASR_DEVICE:-cpu}"  # cpu | cuda:0 (cpu avoids VRAM contention)
-      FISH_CONCURRENCY: "${FISH_CONCURRENCY:-1}"
+      FISH_BATCH_SIZE: "${FISH_BATCH_SIZE:-1}"    # >1 = continuous batching (needs FISH_QUANTIZE=none)
+      FISH_CONCURRENCY: "${FISH_CONCURRENCY:-}"   # empty = FISH_BATCH_SIZE
       FISH_QUEUE_TIMEOUT: "${FISH_QUEUE_TIMEOUT:-300}"
       # Persist torch.compile/Triton kernels to the mounted cache (below) so a
       # restart skips the ~4-min CPU kernel recompile.
