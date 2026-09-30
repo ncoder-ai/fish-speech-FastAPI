@@ -909,6 +909,14 @@ def generate_long_steps(
             ),
         ]
         reference_text = "\n".join(tagged_prompt_text)
+        logger.info(
+            "Reference voices -> speakers: "
+            + ", ".join(
+                f"ref{i} ({c.shape[-1]} frames) -> "
+                + ",".join(re.findall(r"<\|speaker:(\d+)\|>", t))
+                for i, (t, c) in enumerate(zip(tagged_prompt_text, prompt_tokens))
+            )
+        )
         system_parts.append(TextPart(text=reference_text, cal_loss=False))
         system_parts.append(TextPart(text="\n\nSpeech:\n", cal_loss=False))
         all_codes = torch.cat([c for c in prompt_tokens], dim=1)
