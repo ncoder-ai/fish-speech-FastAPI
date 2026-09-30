@@ -123,10 +123,12 @@ class ReferenceLoader:
                 self.ref_by_hash[audio_hashes[i]] = (prompt_tokens[-1], ref.text)
 
             else:
-                # Reuse already encoded references
-                cached_token, cached_text = self.ref_by_hash[audio_hashes[i]]
+                # Reuse the encoded audio only. The text must come from THIS
+                # request: multi-speaker requests tag it (<|speaker:N|>...), and
+                # the same voice can be a different speaker in another request.
+                cached_token, _ = self.ref_by_hash[audio_hashes[i]]
                 prompt_tokens.append(cached_token)
-                prompt_texts.append(cached_text)
+                prompt_texts.append(ref.text)
                 cache_used = True
 
         if cache_used:
