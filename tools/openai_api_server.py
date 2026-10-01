@@ -265,6 +265,19 @@ def _voice_map_problem(voice_map: Dict[str, str]) -> Optional[Tuple[int, str]]:
     return None
 
 
+def _voice_problem(voice_id: str) -> Optional[Tuple[int, str]]:
+    """Pre-flight check for a single registered voice (`voice` / `reference_id`).
+
+    Same contract as _voice_map_problem: call before a StreamingResponse starts.
+    Without it an unknown name silently rendered with no reference voice."""
+    d = _voice_dir(voice_id)
+    if not d.is_dir():
+        return (404, f"Unknown voice '{voice_id}'")
+    if not any(f.suffix.lower() in AUDIO_EXTENSIONS for f in d.iterdir()):
+        return (400, f"Voice '{voice_id}' has no audio file")
+    return None
+
+
 def _references_from_voice_map(voice_map: Dict[str, str]) -> List[ServeReferenceAudio]:
     """Build per-speaker reference audios from {speaker_id: registered_voice_id}.
 
@@ -850,6 +863,13 @@ async def audio_speech(request: Request, body: SpeechRequest):
         problem = _voice_map_problem(body.voice_map)
         if problem:
             raise HTTPException(problem[0], problem[1])
+    else:
+        single = body.reference_id or (
+            body.voice if body.voice and body.voice.lower() not in _OPENAI_VOICES else None
+        )
+        problem = _voice_problem(single) if single else None
+        if problem:
+            raise HTTPException(problem[0], problem[1])
 
     want_stream = bool(body.stream or (body.stream_format == "audio"))
 
@@ -900,6 +920,10 @@ async def native_tts(request: Request, body: dict = Body(...)):
     if MODEL_MANAGER is None:
         raise HTTPException(503, "Model still loading")
     req = ServeTTSRequest(**body)
+    if req.reference_id:
+        problem = _voice_problem(req.reference_id)
+        if problem:
+            raise HTTPException(problem[0], problem[1])
     fmt = req.format if req.format in ("wav", "pcm", "mp3", "flac") else "wav"
     # Run the blocking generation off the event loop so it does not stall other
     # requests / health checks, and gate it behind the synthesis slot.

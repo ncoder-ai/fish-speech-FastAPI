@@ -4,9 +4,12 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Callable, Literal, Tuple
 
+import numpy as np
 import torch
 import torchaudio
 from loguru import logger
+
+from fish_speech.inference_engine import reference_trim
 
 from fish_speech.models.dac.modded_dac import DAC
 from fish_speech.utils.file import (
@@ -31,6 +34,8 @@ class ReferenceLoader:
         """
         self.ref_by_id: dict = {}
         self.ref_by_hash: dict = {}
+        # sha256(audio) -> trim plan (or None when the clip is used whole)
+        self._trim_plans: dict = {}
 
         # Make Pylance happy (attribut/method not defined...)
         self.decoder_model: DAC
@@ -71,26 +76,30 @@ class ReferenceLoader:
         self._validate_id(id)
 
         # Load the references audio and text by id
+        # An unknown or empty voice is an error. Creating the folder here (as
+        # before) silently generated with no reference voice at all and left an
+        # empty folder that later broke voice_map requests.
         ref_folder = Path("references") / id
-        ref_folder.mkdir(parents=True, exist_ok=True)
+        if not ref_folder.is_dir():
+            raise FileNotFoundError(f"Unknown voice '{id}'")
         ref_audios = list_files(
             ref_folder, AUDIO_EXTENSIONS, recursive=True, sort=False
         )
+        if not ref_audios:
+            raise FileNotFoundError(f"Voice '{id}' has no audio file")
 
         if use_cache == "off" or id not in self.ref_by_id:
             # If the references are not already loaded, encode them
-            prompt_tokens = [
-                self.encode_reference(
-                    # decoder_model=self.decoder_model,
-                    reference_audio=audio_to_bytes(str(ref_audio)),
-                    enable_reference_audio=True,
+            prompt_tokens, prompt_texts = [], []
+            for ref_audio in ref_audios:
+                audio, text = self._prepare_reference(
+                    audio_to_bytes(str(ref_audio)),
+                    read_ref_text(str(ref_audio.with_suffix(".lab"))),
                 )
-                for ref_audio in ref_audios
-            ]
-            prompt_texts = [
-                read_ref_text(str(ref_audio.with_suffix(".lab")))
-                for ref_audio in ref_audios
-            ]
+                prompt_tokens.append(
+                    self.encode_reference(reference_audio=audio, enable_reference_audio=True)
+                )
+                prompt_texts.append(text)
             self.ref_by_id[id] = (prompt_tokens, prompt_texts)
 
         else:
@@ -111,16 +120,17 @@ class ReferenceLoader:
         cache_used = False
         prompt_tokens, prompt_texts = [], []
         for i, ref in enumerate(references):
+            audio, text = self._prepare_reference(ref.audio, ref.text)
             if use_cache == "off" or audio_hashes[i] not in self.ref_by_hash:
                 # If the references are not already loaded, encode them
                 prompt_tokens.append(
                     self.encode_reference(
-                        reference_audio=ref.audio,
+                        reference_audio=audio,
                         enable_reference_audio=True,
                     )
                 )
-                prompt_texts.append(ref.text)
-                self.ref_by_hash[audio_hashes[i]] = (prompt_tokens[-1], ref.text)
+                prompt_texts.append(text)
+                self.ref_by_hash[audio_hashes[i]] = (prompt_tokens[-1], text)
 
             else:
                 # Reuse the encoded audio only. The text must come from THIS
@@ -128,13 +138,38 @@ class ReferenceLoader:
                 # the same voice can be a different speaker in another request.
                 cached_token, _ = self.ref_by_hash[audio_hashes[i]]
                 prompt_tokens.append(cached_token)
-                prompt_texts.append(ref.text)
+                prompt_texts.append(text)
                 cache_used = True
 
         if cache_used:
             logger.info("Use same references")
 
         return prompt_tokens, prompt_texts
+
+    def _prepare_reference(self, audio: bytes, text: str) -> Tuple[bytes, str]:
+        """Return (audio, text), trimmed if the clip exceeds FISH_REF_MAX_S.
+
+        The trim plan (cut point, kept words) is computed once per clip and
+        cached by audio hash; the text is re-cut per call, since the same clip
+        can arrive with different speaker tags."""
+        key = sha256(audio).hexdigest()
+        if key not in self._trim_plans:
+            plan = None
+            if reference_trim.MAX_S > 0:
+                sr = getattr(self.decoder_model, "sample_rate", 44100)
+                wav = self.load_audio(audio, sr).astype(np.float32)
+                if reference_trim.needs_trim(len(wav) / sr):
+                    plan = reference_trim.plan_trim(wav, sr)
+                    if plan:
+                        logger.info(
+                            f"[ref] trimmed reference {plan['from_s']:.1f}s -> "
+                            f"{plan['to_s']:.1f}s at a pause ({len(plan['kept'])} words kept)"
+                        )
+            self._trim_plans[key] = plan
+        plan = self._trim_plans[key]
+        if plan is None:
+            return audio, text
+        return plan["audio"], reference_trim.trim_text(text, plan)
 
     def load_audio(self, reference_audio: bytes | str, sr: int):
         """

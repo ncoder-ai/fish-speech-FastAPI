@@ -4,8 +4,10 @@ Voice A is speaker 3 in one request and speaker 2 in the next. The second
 request must see its own <|speaker:2|> tag, not the cached <|speaker:3|>.
 Runs without a GPU (encode_reference is stubbed).
 """
+import os
 import sys
 
+os.environ["FISH_REF_MAX_S"] = "0"  # no trimming: the stub audio is not decodable
 sys.path.insert(0, ".")
 from fish_speech.inference_engine.reference_loader import ReferenceLoader
 from fish_speech.utils.schema import ServeReferenceAudio
