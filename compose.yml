@@ -43,8 +43,8 @@ services:
       FISH_ASR_DEVICE: "${FISH_ASR_DEVICE:-cpu}"  # cpu | cuda:0 (cpu avoids VRAM contention)
       FISH_CHUNK_PAUSE_MS: "${FISH_CHUNK_PAUSE_MS:-400}"  # pause at text-chunk boundaries
       FISH_SPLIT_SPEAKERS: "${FISH_SPLIT_SPEAKERS:-1}"    # new generation per speaker change
-      FISH_REF_PER_TURN: "${FISH_REF_PER_TURN:-auto}"     # per-speaker references (auto: 4+ voices)
-      FISH_REF_PER_TURN_MIN: "${FISH_REF_PER_TURN_MIN:-4}"
+      FISH_REF_PER_TURN: "${FISH_REF_PER_TURN:-auto}"     # per-speaker references (auto: 5+ voices)
+      FISH_REF_PER_TURN_MIN: "${FISH_REF_PER_TURN_MIN:-5}"
       FISH_BATCH_SIZE: "${FISH_BATCH_SIZE:-1}"    # >1 = continuous batching (needs FISH_QUANTIZE=none)
       FISH_CONCURRENCY: "${FISH_CONCURRENCY:-}"   # empty = FISH_BATCH_SIZE
       FISH_QUEUE_TIMEOUT: "${FISH_QUEUE_TIMEOUT:-300}"
