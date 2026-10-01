@@ -201,6 +201,12 @@ accepted via `/v1/tts`.
   several speakers in one generation, the model drifts other speakers toward the
   voice it opened with; a 3-voice scene had wrong-voice lines in 10/24 renders
   versus 0/24 with this on, at no speed cost. `0` restores the old grouping.
+- `FISH_REF_PER_TURN` (auto) — give each speaker turn only that speaker's
+  reference voice instead of all references in one block. The model can't keep
+  many voices apart in one block: on a 6-voice scene, 69% of character lines came
+  out in another reference's voice versus 17% per turn, at the same speed.
+  `auto` applies it from `FISH_REF_PER_TURN_MIN` (4) voices; `1` always; `0`
+  never. Three voices in one block tested fine (0/24 renders wrong).
 - `FISH_RAS` (1) — Repetition Aware Sampling; `0` disables it (diagnostics).
 - `FISH_REF_CACHE` (on) — reuse encoded reference voices across requests. The
   voice add/delete endpoints invalidate it; set `off` if you edit files under

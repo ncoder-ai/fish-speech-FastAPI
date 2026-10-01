@@ -56,6 +56,14 @@ RAS_ENABLED = os.environ.get("FISH_RAS", "1") != "0"
 # 3-voice scene had wrong-voice lines vs 0/24 when split). FISH_SPLIT_SPEAKERS=0
 # restores the old grouping.
 SPLIT_ON_SPEAKER_CHANGE = os.environ.get("FISH_SPLIT_SPEAKERS", "1") != "0"
+# Per-turn references: each text batch's system prompt holds only the reference
+# voices of the speakers in that batch. With many references in one block the
+# model blurs them: on a 6-voice scene 69% of character lines came out in
+# another reference's voice, 17% with per-turn references, at the same RTF.
+# Three voices in one block were fine (0/24 renders wrong). "auto" turns it on
+# from FISH_REF_PER_TURN_MIN references; "1" always; "0" never.
+REF_PER_TURN = os.environ.get("FISH_REF_PER_TURN", "auto").strip().lower()
+REF_PER_TURN_MIN = int(os.environ.get("FISH_REF_PER_TURN_MIN", "4"))
 RAS_HIGH_TEMP = 1.0
 RAS_HIGH_TOP_P = 0.9
 
@@ -943,6 +951,33 @@ def generate_long_steps(
         all_codes = torch.cat([c for c in prompt_tokens], dim=1)
         system_parts.append(VQPart(codes=all_codes, cal_loss=False))
         # torch.save(all_codes, "debug_vq_codes.pt")
+        ref_speakers = [
+            set(re.findall(r"<\|speaker:(\d+)\|>", t)) for t in tagged_prompt_text
+        ]
+
+        def system_for(indices):
+            """System message holding only the given references."""
+            return Message(
+                role="system",
+                parts=[
+                    TextPart(
+                        text="convert the provided text to speech reference to the following:\n\nText:\n",
+                        cal_loss=False,
+                    ),
+                    TextPart(
+                        text="\n".join(tagged_prompt_text[i] for i in indices),
+                        cal_loss=False,
+                    ),
+                    TextPart(text="\n\nSpeech:\n", cal_loss=False),
+                    VQPart(
+                        codes=torch.cat([prompt_tokens[i] for i in indices], dim=1),
+                        cal_loss=False,
+                    ),
+                ],
+                cal_loss=False,
+                add_im_start=True,
+                add_im_end=True,
+            )
     else:
         system_parts = [
             TextPart(text="convert the provided text to speech", cal_loss=False)
@@ -997,6 +1032,19 @@ def generate_long_steps(
                 f"({len(batch_text.encode('utf-8'))} bytes) ---"
             )
             logger.info(f"Batch text: {batch_text}")
+
+            # Per-turn references: give this batch only the voices it speaks
+            # in. Many references in one block (e.g. 6 voices, ~90 s) blur
+            # together and characters come out in another reference's voice.
+            per_turn = REF_PER_TURN == "1" or (
+                REF_PER_TURN == "auto" and len(prompt_tokens) >= REF_PER_TURN_MIN
+            )
+            if use_prompt and per_turn and len(prompt_tokens) > 1:
+                present = set(re.findall(r"<\|speaker:(\d+)\|>", batch_text))
+                indices = [i for i, sp in enumerate(ref_speakers) if sp & present]
+                conversation.messages[0] = system_for(
+                    indices or list(range(len(prompt_tokens)))
+                )
 
             # Add user message
             conversation.append(
