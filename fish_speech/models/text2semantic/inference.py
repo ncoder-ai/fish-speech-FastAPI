@@ -50,6 +50,12 @@ RAS_WIN_SIZE = 10  # window for Repetition Aware Sampling
 # FISH_RAS=0 disables Repetition Aware Sampling (resampling a token that
 # repeats within the window at a higher temperature).
 RAS_ENABLED = os.environ.get("FISH_RAS", "1") != "0"
+# Start a new text batch at every speaker change so each generation opens with
+# its own speaker's voice. With several speakers in one batch the model drifts
+# other speakers toward the batch's opening voice (measured: 10/24 renders of a
+# 3-voice scene had wrong-voice lines vs 0/24 when split). FISH_SPLIT_SPEAKERS=0
+# restores the old grouping.
+SPLIT_ON_SPEAKER_CHANGE = os.environ.get("FISH_SPLIT_SPEAKERS", "1") != "0"
 RAS_HIGH_TEMP = 1.0
 RAS_HIGH_TOP_P = 0.9
 
@@ -751,7 +757,10 @@ def split_text_by_speaker(text: str) -> list[str]:
 
 
 def group_turns_into_batches(
-    turns: list[str], max_speakers: int = 3, max_bytes: int = 300
+    turns: list[str],
+    max_speakers: int = 3,
+    max_bytes: int = 300,
+    split_on_speaker_change: bool = False,
 ) -> list[str]:
     """
     Group turns into batches based on speaker count or byte limit.
@@ -768,10 +777,22 @@ def group_turns_into_batches(
     current_batch = []
     current_bytes = 0
 
+    speaker_re = re.compile(r"<\|speaker:(\d+)\|>")
+    current_speaker = None
+
     for turn in turns:
         turn_bytes = len(turn.encode("utf-8"))
+        m = speaker_re.match(turn)
+        speaker = m.group(1) if m else None
+        # Each generation then starts from its own speaker tag; within one
+        # generation the model tends to carry the opening voice into later
+        # turns (other speakers drift toward speaker 0's voice).
+        speaker_changed = (
+            split_on_speaker_change and current_batch and speaker != current_speaker
+        )
+        current_speaker = speaker
 
-        would_exceed_speakers = len(current_batch) >= max_speakers
+        would_exceed_speakers = len(current_batch) >= max_speakers or speaker_changed
         would_exceed_bytes = current_bytes + turn_bytes > max_bytes and current_batch
 
         if would_exceed_speakers or would_exceed_bytes:
@@ -941,7 +962,10 @@ def generate_long_steps(
     turns = split_text_by_speaker(text)
     if turns:
         batches = group_turns_into_batches(
-            turns, max_speakers=5, max_bytes=chunk_length
+            turns,
+            max_speakers=5,
+            max_bytes=chunk_length,
+            split_on_speaker_change=SPLIT_ON_SPEAKER_CHANGE,
         )
     else:
         batches = [text]

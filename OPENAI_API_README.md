@@ -196,6 +196,11 @@ accepted via `/v1/tts`.
   its last word, so chunks joined edge to edge sound rushed next to the ~0.4 s
   the model leaves between sentences within a chunk. The engine measures each
   chunk's trailing silence and pads up to this target. `0` disables.
+- `FISH_SPLIT_SPEAKERS` (1) — in multi-speaker input, start a new generation at
+  every speaker change (consecutive lines by one speaker stay together). With
+  several speakers in one generation, the model drifts other speakers toward the
+  voice it opened with; a 3-voice scene had wrong-voice lines in 10/24 renders
+  versus 0/24 with this on, at no speed cost. `0` restores the old grouping.
 - `FISH_RAS` (1) — Repetition Aware Sampling; `0` disables it (diagnostics).
 - `FISH_REF_CACHE` (on) — reuse encoded reference voices across requests. The
   voice add/delete endpoints invalidate it; set `off` if you edit files under
