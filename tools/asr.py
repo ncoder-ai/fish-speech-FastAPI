@@ -120,3 +120,26 @@ def transcribe(audio_path: str) -> str:
     except Exception as e:
         logger.warning(f"[asr] transcription failed for {audio_path}: {e}")
         return ""
+
+
+def transcribe_words(audio_16k):
+    """Word-level transcript of a 16 kHz mono float array.
+
+    Returns (words, language) where words is a list of (text, start_s, end_s),
+    or ([], None) if ASR is unavailable/failed. Used to trim long reference
+    clips at a pause, with a transcript that matches the kept audio. Runs even
+    when auto-transcription is disabled.
+    """
+    model = _get_model()
+    if model is None:
+        return [], None
+    try:
+        # Default temperature fallback: greedy-only decoding can loop on hard
+        # clips ("bread, bread, bread..."); re-sampling rescues them.
+        segments, info = model.transcribe(audio_16k, beam_size=5, word_timestamps=True)
+        words = [(w.word.strip(), float(w.start), float(w.end))
+                 for s in segments for w in (s.words or []) if w.word.strip()]
+        return words, info.language
+    except Exception as e:
+        logger.warning(f"[asr] word-level transcription failed: {e}")
+        return [], None

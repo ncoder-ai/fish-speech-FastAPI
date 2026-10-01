@@ -45,6 +45,7 @@ services:
       FISH_SPLIT_SPEAKERS: "${FISH_SPLIT_SPEAKERS:-1}"    # new generation per speaker change
       FISH_REF_PER_TURN: "${FISH_REF_PER_TURN:-auto}"     # per-speaker references (auto: 5+ voices)
       FISH_REF_PER_TURN_MIN: "${FISH_REF_PER_TURN_MIN:-5}"
+      FISH_REF_MAX_S: "${FISH_REF_MAX_S:-20}"            # trim long reference clips at a pause
       FISH_BATCH_SIZE: "${FISH_BATCH_SIZE:-1}"    # >1 = continuous batching (needs FISH_QUANTIZE=none)
       FISH_CONCURRENCY: "${FISH_CONCURRENCY:-}"   # empty = FISH_BATCH_SIZE
       FISH_QUEUE_TIMEOUT: "${FISH_QUEUE_TIMEOUT:-300}"

@@ -208,6 +208,13 @@ accepted via `/v1/tts`.
   `auto` applies it from `FISH_REF_PER_TURN_MIN` (5) voices; `1` always; `0`
   never. Up to four voices in one block work (3 voices tested 0/24 renders
   wrong; 4 confirmed in use), and keep full prefix reuse.
+- `FISH_REF_MAX_S` (20) — reference clips longer than this are trimmed in memory
+  (files on disk are untouched). Long clips degrade cloning and can scramble a
+  multi-voice scene (an 87 s clip broke a 7-voice scene). The cut goes in a real
+  pause after a sentence or clause end (checked against the audio, never inside
+  a word, with a short fade), and the transcript is cut to the kept words. A clip
+  with no clean pause or an unreliable transcription is left whole, with a
+  warning in the log. `0` disables trimming.
 - `FISH_RAS` (1) — Repetition Aware Sampling; `0` disables it (diagnostics).
 - `FISH_REF_CACHE` (on) — reuse encoded reference voices across requests. The
   voice add/delete endpoints invalidate it; set `off` if you edit files under
