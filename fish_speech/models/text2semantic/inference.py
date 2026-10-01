@@ -60,10 +60,11 @@ SPLIT_ON_SPEAKER_CHANGE = os.environ.get("FISH_SPLIT_SPEAKERS", "1") != "0"
 # voices of the speakers in that batch. With many references in one block the
 # model blurs them: on a 6-voice scene 69% of character lines came out in
 # another reference's voice, 17% with per-turn references, at the same RTF.
-# Three voices in one block were fine (0/24 renders wrong). "auto" turns it on
+# Up to four voices in one block work (3 voices: 0/24 renders wrong; 4 confirmed
+# in use). "auto" turns it on
 # from FISH_REF_PER_TURN_MIN references; "1" always; "0" never.
 REF_PER_TURN = os.environ.get("FISH_REF_PER_TURN", "auto").strip().lower()
-REF_PER_TURN_MIN = int(os.environ.get("FISH_REF_PER_TURN_MIN", "4"))
+REF_PER_TURN_MIN = int(os.environ.get("FISH_REF_PER_TURN_MIN", "5"))
 RAS_HIGH_TEMP = 1.0
 RAS_HIGH_TOP_P = 0.9
 
